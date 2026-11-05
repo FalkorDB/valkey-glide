@@ -6,6 +6,7 @@ use glide_core::graph::GraphContext;
 use jni::JNIEnv;
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jlong, jlongArray};
+use redis::{ErrorKind, RedisError};
 use std::sync::OnceLock;
 
 struct SelectedGraph {
@@ -111,6 +112,7 @@ pub extern "system" fn Java_glide_internal_NativeGraphContext_executeNative(
     callback_id: jlong,
     request: JByteArray,
 ) {
+    let submitted_at = tokio::time::Instant::now();
     let Some(jvm) = crate::get_jvm_or_complete_error(&mut env, callback_id, "graphQuery") else {
         return;
     };
@@ -129,15 +131,16 @@ pub extern "system" fn Java_glide_internal_NativeGraphContext_executeNative(
             return;
         }
     };
-    let bytes = match env.convert_byte_array(request) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            complete_error_sync(&mut env, callback_id, &error.to_string(), 0);
-            return;
-        }
-    };
+    let bytes = env.convert_byte_array(request).map_err(|error| {
+        RedisError::from((
+            ErrorKind::ClientError,
+            "Invalid graph request byte array",
+            error.to_string(),
+        ))
+    });
     get_runtime().spawn(async move {
-        let result = glide_core::graph::execute_request_with_context(context, &bytes).await;
+        let result =
+            glide_core::graph::execute_request_with_context_at(context, bytes, submitted_at).await;
         complete_callback(jvm, callback_id, result, false);
     });
 }

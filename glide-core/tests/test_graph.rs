@@ -151,6 +151,46 @@ fn server(scripts: HashMap<String, Vec<String>>) -> ServerMock {
     )
 }
 
+async fn delayed_byte_bridge_poll(retained: bool) {
+    use glide_core::graph::{execute_request, execute_request_with_context};
+    use protobuf::Message;
+
+    let (client, observed, server) = delayed_client().await;
+    let request = glide_core::graph_request::QueryRequest {
+        graph_name: "graph".into(),
+        query: "CREATE (n) RETURN 42".into(),
+        ..Default::default()
+    };
+    let bytes = request.write_to_bytes().unwrap();
+    let operation: std::pin::Pin<
+        Box<dyn std::future::Future<Output = redis::RedisResult<Value>> + '_>,
+    > = if retained {
+        let graph = GraphContext::new(client.clone(), "graph".into(), 0).unwrap();
+        Box::pin(execute_request_with_context(graph, &bytes))
+    } else {
+        Box::pin(execute_request(client.clone(), &bytes))
+    };
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let result = operation.await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    assert!(
+        result.as_ref().is_err_and(|error| error.is_timeout()),
+        "retained={retained}: {result:?}"
+    );
+    assert_eq!(observed.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn byte_bridge_deadline_includes_time_before_first_poll() {
+    delayed_byte_bridge_poll(false).await;
+}
+
+#[tokio::test]
+async fn retained_byte_bridge_deadline_includes_time_before_first_poll() {
+    delayed_byte_bridge_poll(true).await;
+}
+
 async fn client(mock: &ServerMock) -> Client {
     let address = match &mock.get_addresses()[0] {
         ConnectionAddr::Tcp(host, port) => NodeAddress {
@@ -416,6 +456,9 @@ async fn successful_batch_reset_confirms_database_zero() {
 async fn successful_batch_database_changes_survive_later_command_errors() {
     for atomic in [false, true] {
         for reset in [false, true] {
+            if atomic && reset {
+                continue;
+            }
             for raise_on_error in [false, true] {
                 let mut replies = HashMap::from([
                     (
@@ -442,14 +485,7 @@ async fn successful_batch_database_changes_survive_later_command_errors() {
                     replies.insert("MULTI".into(), vec!["+OK\r\n".into()]);
                     replies.insert(
                         "EXEC".into(),
-                        vec![
-                            if reset {
-                                "*3\r\n+OK\r\n+RESET\r\n-ERR test integer failure\r\n"
-                            } else {
-                                "*2\r\n+OK\r\n-ERR test integer failure\r\n"
-                            }
-                            .into(),
-                        ],
+                        vec!["*2\r\n+OK\r\n-ERR test integer failure\r\n".into()],
                     );
                 }
                 let mock = server(replies);
@@ -485,6 +521,48 @@ async fn successful_batch_database_changes_survive_later_command_errors() {
                 mock.close().await;
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn reset_cancels_atomic_batch_and_leaves_database_unsettled_until_reconfirmed() {
+    for raise_on_error in [false, true] {
+        let mock = server(HashMap::from([
+            ("SELECT".into(), vec!["+OK\r\n".into(), "+OK\r\n".into()]),
+            ("MULTI".into(), vec!["+OK\r\n".into()]),
+            ("RESET".into(), vec!["+RESET\r\n".into()]),
+            ("EXEC".into(), vec!["-ERR EXEC without MULTI\r\n".into()]),
+        ]));
+        let mut client = client(&mock).await;
+        client
+            .send_command(redis::cmd("SELECT").arg(3), None)
+            .await
+            .unwrap();
+        let old = GraphContext::new(client.clone(), "graph".into(), 3).unwrap();
+        let mut pipeline = redis::pipe();
+        pipeline.atomic().cmd("RESET");
+        let error = client
+            .send_transaction(&pipeline, None, None, raise_on_error)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("EXEC without MULTI"), "{error}");
+        assert_eq!(client.graph_database_epoch() & 1, 1);
+        assert!(GraphContext::new(client.clone(), "graph".into(), 0).is_err());
+        assert!(
+            old.query("RETURN 42", &GraphQueryOptions::default())
+                .await
+                .is_err()
+        );
+        client
+            .send_command(redis::cmd("SELECT").arg(0), None)
+            .await
+            .unwrap();
+        assert_eq!(client.current_database(), 0);
+        assert_eq!(client.graph_database_epoch() & 1, 0);
+        assert!(GraphContext::new(client.clone(), "graph".into(), 0).is_ok());
+        drop(old);
+        drop(client);
+        mock.close().await;
     }
 }
 

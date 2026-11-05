@@ -42,6 +42,25 @@ pub mod graph {
     ) -> redis::RedisResult<redis::Value> {
         Ok(redis::Value::BulkString(bytes.to_vec().into()))
     }
+
+    pub async fn execute_request_at<B: AsRef<[u8]>>(
+        client: crate::client::Client,
+        bytes: redis::RedisResult<B>,
+        _submitted_at: tokio::time::Instant,
+    ) -> redis::RedisResult<redis::Value> {
+        let bytes = bytes?;
+        execute_request(client, bytes.as_ref()).await
+    }
+
+    pub async fn execute_request_with_context_at<B: AsRef<[u8]>>(
+        graph: GraphContext,
+        bytes: redis::RedisResult<B>,
+        submitted_at: tokio::time::Instant,
+    ) -> redis::RedisResult<redis::Value> {
+        let result = execute_request_at(graph.inner.0.clone(), bytes, submitted_at).await;
+        drop(graph);
+        result
+    }
 }
 pub use glide_core::graph_request;
 pub mod otel_db_semantics;

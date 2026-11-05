@@ -337,6 +337,7 @@ enum WorkerMessage {
         callback_idx: u32,
         request: Vec<u8>,
         context: Arc<glide_core::graph::GraphContext>,
+        submitted_at: tokio::time::Instant,
     },
 }
 
@@ -1134,14 +1135,16 @@ fn run_worker_message(
             callback_idx,
             request,
             context,
+            submitted_at,
         } => {
             let inflight = Arc::clone(worker_inflight);
             let buffer = Arc::clone(response_buffer_worker);
             let wake = wake_tsfn_worker.clone();
             task::spawn_local(async move {
-                let result = glide_core::graph::execute_request_with_context(
+                let result = glide_core::graph::execute_request_with_context_at(
                     context.as_ref().clone(),
-                    &request,
+                    Ok(request),
+                    submitted_at,
                 )
                 .await;
                 drop(context);
@@ -1828,6 +1831,7 @@ impl GlideClientHandle {
         request_bytes: Uint8Array,
         graph: &GraphHandle,
     ) -> Result<bool> {
+        let submitted_at = tokio::time::Instant::now();
         if self.closed {
             return Err(Error::new(Status::Closing, "Client connection closed"));
         }
@@ -1852,6 +1856,7 @@ impl GlideClientHandle {
             callback_idx,
             request: request_bytes.to_vec(),
             context: Arc::clone(&graph.context),
+            submitted_at,
         };
         let failed = match &self.command_tx {
             Some(sender) => sender.send(message).is_err(),
@@ -4068,6 +4073,7 @@ mod tests {
                         callback_idx: 17,
                         request: vec![0xff],
                         context: Arc::clone(&graph.context),
+                        submitted_at: tokio::time::Instant::now(),
                     },
                     &client,
                     &inflight,
@@ -4084,6 +4090,46 @@ mod tests {
                 assert_eq!(responses.len(), 1);
                 assert_eq!(responses[0].callback_idx, 17);
                 assert!(responses[0].request_error.is_some());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn graph_worker_rejects_an_expired_submission_before_adaptation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let client = lazy_client(ConnectionRequest {
+                    request_timeout: Some(10),
+                    ..Default::default()
+                })
+                .await;
+                let context =
+                    glide_core::graph::GraphContext::new(client.clone(), "local-only".into(), 0)
+                        .unwrap();
+                let inflight = Arc::new(AtomicIsize::new(0));
+                let buffer = Arc::new(ResponseBuffer::new());
+                run_worker_message(
+                    WorkerMessage::GraphQuery {
+                        callback_idx: 23,
+                        request: vec![0xff],
+                        context: Arc::new(context),
+                        submitted_at: tokio::time::Instant::now()
+                            - std::time::Duration::from_secs(1),
+                    },
+                    &client,
+                    &inflight,
+                    &buffer,
+                    &std::sync::Weak::new(),
+                );
+                tokio::task::yield_now().await;
+                assert_eq!(inflight.load(Ordering::Acquire), 1);
+                let responses = buffer.responses.lock();
+                assert_eq!(responses.len(), 1);
+                assert_eq!(responses[0].callback_idx, 23);
+                assert_eq!(
+                    responses[0].request_error.as_ref().unwrap().error_type,
+                    glide_core::errors::RequestErrorType::Timeout as u32
+                );
             })
             .await;
     }

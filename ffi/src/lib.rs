@@ -4963,6 +4963,7 @@ pub unsafe extern "C" fn graph_query(
     request_bytes: *const u8,
     request_len: usize,
 ) -> *mut CommandResult {
+    let submitted_at = tokio::time::Instant::now();
     // SAFETY: the caller keeps the original Arc alive and excludes close while
     // this call acquires its own strong reference.
     let adapter = unsafe {
@@ -4972,9 +4973,10 @@ pub unsafe extern "C" fn graph_query(
     // SAFETY: the caller keeps the initialized request buffer live for this call.
     let request = unsafe { copy_graph_request(request_bytes, request_len) };
     let client = adapter.core.client.clone();
-    adapter.execute_request(request_id, async move {
-        glide_core::graph::execute_request(client, &request?).await
-    })
+    adapter.execute_request(
+        request_id,
+        glide_core::graph::execute_request_at(client, request, submitted_at),
+    )
 }
 
 unsafe fn copy_graph_request(request_bytes: *const u8, request_len: usize) -> RedisResult<Vec<u8>> {
@@ -5000,6 +5002,136 @@ unsafe fn copy_graph_request(request_bytes: *const u8, request_len: usize) -> Re
                 error.to_string(),
             ))
         })
+}
+
+#[cfg(all(test, not(miri)))]
+mod tests_graph_submission_deadline {
+    use super::*;
+    use protobuf::Message;
+    use std::sync::{Mutex, mpsc};
+    use std::time::Duration;
+
+    static COMPLETION: Mutex<Option<mpsc::Sender<RequestErrorType>>> = Mutex::new(None);
+
+    unsafe extern "C-unwind" fn failure(
+        _id: usize,
+        _message: *const c_char,
+        kind: RequestErrorType,
+    ) {
+        COMPLETION
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send(kind)
+            .unwrap();
+    }
+
+    unsafe extern "C-unwind" fn unexpected_success(_id: usize, _response: *const CommandResponse) {
+        panic!("an expired graph submission cannot succeed");
+    }
+
+    #[test]
+    fn expired_native_graph_submissions_do_not_connect_after_worker_queueing() {
+        for retained in [false, true] {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let mut connection = connection_request::ConnectionRequest::new();
+            connection.lazy_connect = true;
+            connection.request_timeout = 20;
+            let mut address = connection_request::NodeAddress::new();
+            address.host = "127.0.0.1".into();
+            address.port = listener.local_addr().unwrap().port().into();
+            connection.addresses.push(address);
+            let bytes = connection.write_to_bytes().unwrap();
+            let client_type = ClientType::AsyncClient {
+                success_callback: unexpected_success,
+                failure_callback: failure,
+                allow_stack_response: false,
+            };
+            // SAFETY: the input bytes and callback descriptors remain live through
+            // creation; the returned adapter is closed once after all work finishes.
+            let adapter_ptr = unsafe {
+                let response =
+                    create_client(bytes.as_ptr(), bytes.len(), &client_type, None, None, 0);
+                assert!(!response.is_null());
+                assert!((*response).connection_error_message.is_null());
+                let adapter = (*response).conn_ptr;
+                free_connection_response(response.cast_mut());
+                adapter
+            };
+            // SAFETY: this test exclusively owns the live adapter through cleanup.
+            let adapter = unsafe { &*adapter_ptr.cast::<ClientAdapter>() };
+            let (ready, ready_receiver) = mpsc::channel();
+            let mut releases = Vec::new();
+            for _ in 0..adapter.runtime.metrics().num_workers() {
+                let ready = ready.clone();
+                let (release, waiting) = mpsc::channel();
+                releases.push(release);
+                adapter.runtime.spawn(async move {
+                    ready.send(()).unwrap();
+                    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+                });
+            }
+            for _ in &releases {
+                ready_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            let (completion, completed) = mpsc::channel();
+            *COMPLETION.lock().unwrap() = Some(completion);
+            let request = glide_core::graph_request::QueryRequest {
+                graph_name: "queued".into(),
+                query: "CREATE (n) RETURN n".into(),
+                ..Default::default()
+            };
+            let bytes = request.write_to_bytes().unwrap();
+            let mut context = std::ptr::null_mut();
+            // SAFETY: adapter, context output, and bytes remain live through
+            // submission. The retained context and adapter are released exactly once.
+            unsafe {
+                if retained {
+                    let name = b"queued";
+                    assert!(
+                        graph_context_create(
+                            adapter_ptr,
+                            name.as_ptr(),
+                            name.len(),
+                            0,
+                            0,
+                            &mut context,
+                        )
+                        .is_null()
+                    );
+                    assert!(
+                        graph_query_with_context(
+                            adapter_ptr,
+                            context,
+                            1,
+                            bytes.as_ptr(),
+                            bytes.len(),
+                        )
+                        .is_null()
+                    );
+                } else {
+                    assert!(graph_query(adapter_ptr, 1, bytes.as_ptr(), bytes.len()).is_null());
+                }
+            }
+            drop(bytes);
+            std::thread::sleep(Duration::from_millis(60));
+            for release in releases {
+                release.send(()).unwrap();
+            }
+            let kind = completed.recv_timeout(Duration::from_secs(5)).unwrap();
+            let connected = listener.accept().is_ok();
+            // SAFETY: submission and its callback have completed; no close/drop races.
+            unsafe {
+                graph_context_drop(context);
+                close_client(adapter_ptr);
+            }
+            *COMPLETION.lock().unwrap() = None;
+            assert_eq!(kind as i32, RequestErrorType::Timeout as i32);
+            assert!(!connected, "retained={retained}: expired request connected");
+        }
+    }
 }
 
 /// Retain a selected Rust graph context without connecting or issuing I/O.
@@ -5119,6 +5251,7 @@ pub unsafe extern "C" fn graph_query_with_context(
     request_bytes: *const u8,
     request_len: usize,
 ) -> *mut CommandResult {
+    let submitted_at = tokio::time::Instant::now();
     // SAFETY: the caller excludes close while this call retains the live adapter.
     let adapter = unsafe {
         Arc::increment_strong_count(client_adapter_ptr.cast::<ClientAdapter>());
@@ -5136,7 +5269,7 @@ pub unsafe extern "C" fn graph_query_with_context(
     // SAFETY: the caller keeps initialized request bytes live through this copy.
     let request = unsafe { copy_graph_request(request_bytes, request_len) };
     adapter.execute_request(request_id, async move {
-        glide_core::graph::execute_request_with_context(context?, &request?).await
+        glide_core::graph::execute_request_with_context_at(context?, request, submitted_at).await
     })
 }
 

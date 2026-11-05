@@ -19,7 +19,10 @@ use redis::{Cmd, ErrorKind, RedisError, RedisResult};
 use std::sync::Arc;
 
 #[cfg(feature = "proto")]
-pub use request::{execute_request, execute_request_with_context, parse_request};
+pub use request::{
+    execute_request, execute_request_at, execute_request_with_context,
+    execute_request_with_context_at, parse_request,
+};
 
 /// A locally selected graph. Clones retain the same client and selected database.
 #[derive(Clone)]

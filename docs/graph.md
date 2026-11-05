@@ -38,10 +38,13 @@ before selecting another graph. Graph operations hold a shared connection-state 
 metadata resolution. `SELECT`, `RESET` and raw transaction-state changes take an
 exclusive lease, so they cannot move an in-flight graph operation to another
 database or queue it inside `MULTI`; independent graph queries remain concurrent.
-A confirmed successful `RESET`, including in a batch, selects database zero for
+A confirmed successful `RESET`, including in a non-atomic batch, selects database zero for
 fresh graph handles. Confirmed batch state changes are recorded before reporting
 an unrelated per-command error. An ambiguous batch state change still requires a
 successful standalone `SELECT` before selecting a new handle.
+`RESET` immediately cancels `MULTI`; it is not a queued command in `EXEC`.
+An atomic batch containing `RESET` consequently fails with `EXEC without MULTI`
+and conservatively invalidates graph handles until a standalone `SELECT` succeeds.
 Graph handles cannot retain pooled-client leases or isolated
 scopes; no graph-specific pooling API is introduced.
 
@@ -84,9 +87,11 @@ The optional graph server timeout is a nonnegative millisecond count within the
 server's signed 64-bit range. Zero keeps its server-defined meaning. It is
 also subject to the server's separately configured `TIMEOUT_MAX` limit. It is
 separate from the configured GLIDE client request timeout. One client deadline
-covers native serialization, query execution, metadata reads, permitted redirects,
+covers native adaptation and worker queueing, serialization, query execution, metadata reads, permitted redirects,
 compact decoding and canonical result encoding. Metadata does not get a fresh
-end-to-end budget. Synchronous decoding cannot be preempted; if it finishes after
+end-to-end budget. Native bridges capture the submission time before copying or
+parsing the request, rather than when a worker first polls it. An already-expired
+queued operation does not dispatch its graph command. Synchronous decoding cannot be preempted; if it finishes after
 the deadline, the operation returns the normal client timeout rather than a late
 success.
 

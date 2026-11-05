@@ -6,12 +6,29 @@ use crate::graph_request::{Parameter, ParameterMap, QueryRequest, parameter};
 use protobuf::Message;
 use redis::{ErrorKind, RedisError, RedisResult, Value};
 use std::collections::BTreeMap;
+use std::future::Future;
+use tokio::time::Instant;
 
 /// Execute the graph-only byte bridge, preserving int64 values in protobuf.
-pub async fn execute_request(client: Client, bytes: &[u8]) -> RedisResult<Value> {
-    let deadline = tokio::time::Instant::now() + client.get_request_timeout();
+pub fn execute_request(
+    client: Client,
+    bytes: &[u8],
+) -> impl Future<Output = RedisResult<Value>> + '_ {
+    execute_request_at(client, Ok(bytes), Instant::now())
+}
+
+/// Execute using the native submission time, including adaptation and queueing.
+///
+/// Adaptation failures are checked inside the same deadline as successful bytes.
+pub async fn execute_request_at<B: AsRef<[u8]>>(
+    client: Client,
+    bytes: RedisResult<B>,
+    submitted_at: Instant,
+) -> RedisResult<Value> {
+    let deadline = submitted_at + client.get_request_timeout();
     within_deadline(deadline, async {
-        let request = parse_request(bytes)?;
+        let bytes = bytes?;
+        let request = parse_request(bytes.as_ref())?;
         if client.graph_database_epoch() != request.database_epoch {
             return Err(invalid(
                 "Graph handle's database changed; select a new graph handle".into(),
@@ -27,10 +44,23 @@ pub async fn execute_request(client: Client, bytes: &[u8]) -> RedisResult<Value>
 ///
 /// The request identity must match the immutable selection; it cannot redirect a
 /// retained handle to another graph or database.
-pub async fn execute_request_with_context(graph: GraphContext, bytes: &[u8]) -> RedisResult<Value> {
-    let deadline = tokio::time::Instant::now() + graph.inner.client.get_request_timeout();
+pub fn execute_request_with_context(
+    graph: GraphContext,
+    bytes: &[u8],
+) -> impl Future<Output = RedisResult<Value>> + '_ {
+    execute_request_with_context_at(graph, Ok(bytes), Instant::now())
+}
+
+/// Execute on a retained context with the original native submission deadline.
+pub async fn execute_request_with_context_at<B: AsRef<[u8]>>(
+    graph: GraphContext,
+    bytes: RedisResult<B>,
+    submitted_at: Instant,
+) -> RedisResult<Value> {
+    let deadline = submitted_at + graph.inner.client.get_request_timeout();
     within_deadline(deadline, async {
-        let request = parse_request(bytes)?;
+        let bytes = bytes?;
+        let request = parse_request(bytes.as_ref())?;
         if request.graph_name.as_bytes() != graph.name().as_bytes()
             || request.database != graph.inner.database
             || request.database_epoch != graph.inner.database_epoch
@@ -130,6 +160,52 @@ mod tests {
     use super::*;
     use crate::graph_request::{ParameterEntry, ParameterList};
     use protobuf::MessageField;
+
+    #[tokio::test]
+    async fn original_submission_budget_includes_failed_native_adaptation() {
+        use crate::client::{ConnectionRequest, NodeAddress};
+        use std::time::Duration;
+
+        let client = Client::new(
+            ConnectionRequest {
+                addresses: vec![NodeAddress {
+                    host: "127.0.0.1".into(),
+                    port: 1,
+                    unix_socket_path: None,
+                }],
+                request_timeout: Some(1000),
+                lazy_connect: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        for expired in [false, true] {
+            let submitted_at = if expired {
+                Instant::now() - Duration::from_secs(2)
+            } else {
+                Instant::now()
+            };
+            let adaptation: RedisResult<Vec<u8>> = Err(invalid("native adaptation failed".into()));
+            let error = execute_request_at(client.clone(), adaptation, submitted_at)
+                .await
+                .unwrap_err();
+            assert_eq!(error.is_timeout(), expired, "{error}");
+            if !expired {
+                assert!(error.to_string().contains("native adaptation failed"));
+            }
+            let graph = GraphContext::new(client.clone(), "local".into(), 0).unwrap();
+            let adaptation: RedisResult<Vec<u8>> = Err(invalid("native adaptation failed".into()));
+            let error = execute_request_with_context_at(graph, adaptation, submitted_at)
+                .await
+                .unwrap_err();
+            assert_eq!(error.is_timeout(), expired, "{error}");
+            if !expired {
+                assert!(error.to_string().contains("native adaptation failed"));
+            }
+        }
+    }
 
     #[test]
     fn bridge_and_serializer_agree_at_the_parameter_depth_boundary() {
