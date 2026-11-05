@@ -105,14 +105,7 @@ impl GraphContext {
         if !self.database_matches() {
             return Err(database_changed());
         }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
-        }
-        match tokio::time::timeout_at(deadline, self.execute_inner(&query, options, readonly)).await
-        {
-            Ok(result) => result,
-            Err(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into()),
-        }
+        within_deadline(deadline, self.execute_inner(&query, options, readonly)).await
     }
 
     async fn execute_inner(
@@ -191,6 +184,24 @@ impl GraphContext {
     }
 }
 
+async fn within_deadline<T>(
+    deadline: tokio::time::Instant,
+    operation: impl std::future::Future<Output = RedisResult<T>>,
+) -> RedisResult<T> {
+    if tokio::time::Instant::now() >= deadline {
+        return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+    }
+    let result = tokio::time::timeout_at(deadline, operation).await;
+    // Tokio cannot preempt synchronous decoding or canonical-result conversion.
+    if tokio::time::Instant::now() >= deadline {
+        return Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into());
+    }
+    match result {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into()),
+    }
+}
+
 fn database_changed() -> RedisError {
     RedisError::from((
         ErrorKind::ClientError,
@@ -235,6 +246,60 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.is_timeout(), "{error}");
+    }
+
+    #[tokio::test]
+    async fn synchronous_completion_cannot_outlive_the_operation_budget() {
+        for result in [
+            Ok(42),
+            Err(RedisError::from((
+                ErrorKind::ResponseError,
+                "server failure",
+            ))),
+        ] {
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+            let mut executions = 0;
+            let error = within_deadline(deadline, async {
+                executions += 1;
+                std::thread::sleep(Duration::from_millis(200));
+                result
+            })
+            .await
+            .unwrap_err();
+            assert!(error.is_timeout(), "{error}");
+            assert_eq!(executions, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn exhausted_deadline_does_not_poll_the_operation() {
+        let mut polled = false;
+        let error = within_deadline(tokio::time::Instant::now(), async {
+            polled = true;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(error.is_timeout(), "{error}");
+        assert!(!polled);
+    }
+
+    #[tokio::test]
+    async fn on_time_completion_preserves_results_and_error_categories() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        assert_eq!(
+            within_deadline(deadline, async { Ok(42) }).await.unwrap(),
+            42
+        );
+        let error = within_deadline(deadline, async {
+            Err::<(), _>(RedisError::from((
+                ErrorKind::ResponseError,
+                "server failure",
+            )))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ResponseError);
     }
 
     #[tokio::test]
