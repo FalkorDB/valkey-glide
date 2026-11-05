@@ -17,8 +17,9 @@ import (
 const maxParameterDepth = 100
 
 type visit struct {
-	kind reflect.Kind
-	ptr  uintptr
+	typ    reflect.Type
+	ptr    uintptr
+	length int
 }
 
 // NewRequest validates typed parameters without converting integers through JSON.
@@ -105,7 +106,7 @@ func encodeParameter(value reflect.Value, path string, active map[visit]bool, de
 		if value.IsNil() {
 			return encodeParameter(reflect.Value{}, path, active, depth)
 		}
-		key := visit{kind: reflect.Map, ptr: value.Pointer()}
+		key := visit{typ: value.Type(), ptr: value.Pointer()}
 		if active[key] {
 			return nil, parameterError(path, "cyclic map")
 		}
@@ -131,7 +132,7 @@ func encodeParameter(value reflect.Value, path string, active map[visit]bool, de
 			if value.IsNil() {
 				return encodeParameter(reflect.Value{}, path, active, depth)
 			}
-			key := visit{kind: reflect.Slice, ptr: value.Pointer()}
+			key := visit{typ: value.Type(), ptr: value.Pointer(), length: value.Len()}
 			if active[key] {
 				return nil, parameterError(path, "cyclic list")
 			}

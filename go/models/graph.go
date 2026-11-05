@@ -62,23 +62,24 @@ type GraphDate int64
 // GraphTime preserves the server's raw seconds-offset time value.
 type GraphTime int64
 
-// GraphDuration preserves the server's raw seconds duration value.
+// GraphDuration preserves the server's raw calendar/epoch-offset duration
+// encoding, not elapsed seconds or a time.Duration.
 type GraphDuration int64
 
 // GraphStatistics retains all raw server statistics, including unknown fields.
 // Nil optional fields mean the server omitted that statistic, not zero.
 type GraphStatistics struct {
 	Raw                  []string
-	LabelsAdded          *int64
-	LabelsRemoved        *int64
-	NodesCreated         *int64
-	NodesDeleted         *int64
-	PropertiesSet        *int64
-	PropertiesRemoved    *int64
-	RelationshipsCreated *int64
-	RelationshipsDeleted *int64
-	IndicesCreated       *int64
-	IndicesDeleted       *int64
+	LabelsAdded          *uint64
+	LabelsRemoved        *uint64
+	NodesCreated         *uint64
+	NodesDeleted         *uint64
+	PropertiesSet        *uint64
+	PropertiesRemoved    *uint64
+	RelationshipsCreated *uint64
+	RelationshipsDeleted *uint64
+	IndicesCreated       *uint64
+	IndicesDeleted       *uint64
 	CachedExecution      *bool
 	ExecutionTimeMs      *float64
 	GraphVersion         *uint64

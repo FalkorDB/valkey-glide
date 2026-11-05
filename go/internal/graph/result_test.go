@@ -5,6 +5,8 @@ package graph
 import (
 	"math"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/valkey-io/valkey-glide/go/v2/models"
@@ -117,6 +119,98 @@ func TestGraphStatisticsPreserveOptionalAndRaw(t *testing.T) {
 	}
 }
 
+func TestGraphStatisticsUnsignedCounters(t *testing.T) {
+	counters := []string{
+		"labels_added", "labels_removed", "nodes_created", "nodes_deleted", "properties_set", "properties_removed",
+		"relationships_created", "relationships_deleted", "indices_created", "indices_deleted", "graph_version",
+	}
+	for _, name := range counters {
+		t.Run(name, func(t *testing.T) {
+			for _, number := range []uint64{0, math.MaxInt64 - 1, math.MaxInt64, uint64(math.MaxInt64) + 1, math.MaxUint64} {
+				var encoded any = strconv.FormatUint(number, 10)
+				if number <= math.MaxInt64 {
+					encoded = int64(number)
+				}
+				fields := map[string]any{"raw": nil, name: encoded}
+				stats, err := decodeStatistics(fields)
+				if err != nil {
+					t.Fatalf("%d: %v", number, err)
+				}
+				targets := []any{
+					stats.LabelsAdded, stats.LabelsRemoved, stats.NodesCreated, stats.NodesDeleted, stats.PropertiesSet,
+					stats.PropertiesRemoved, stats.RelationshipsCreated, stats.RelationshipsDeleted,
+					stats.IndicesCreated, stats.IndicesDeleted, stats.GraphVersion,
+				}
+				for index, target := range targets {
+					pointer := reflect.ValueOf(target)
+					if counters[index] != name {
+						if !pointer.IsNil() {
+							t.Fatalf("omitted counter %s is present", counters[index])
+						}
+						continue
+					}
+					if pointer.IsNil() || pointer.Elem().Kind() != reflect.Uint64 || pointer.Elem().Uint() != number {
+						t.Fatalf("%s lost unsigned value %d: %+v", name, number, stats)
+					}
+				}
+			}
+			for _, invalid := range []any{int64(-1), "-1", "18446744073709551616", "1.5", "", 1.0, nil} {
+				if _, err := decodeStatistics(map[string]any{"raw": nil, name: invalid}); err == nil ||
+					!strings.Contains(err.Error(), "$.statistics."+name) {
+					t.Fatalf("invalid counter %v must fail at its path: %v", invalid, err)
+				}
+			}
+		})
+	}
+}
+
+func TestGraphResultDepthBoundary(t *testing.T) {
+	for _, kind := range []string{"list", "map", "node", "relationship", "path"} {
+		for _, depth := range []int{100, 101, 127, 128, 129} {
+			t.Run(kind+"/"+strconv.Itoa(depth), func(t *testing.T) {
+				var value any = envelope("integer", int64(7))
+				for index := 0; index < depth; index++ {
+					switch kind {
+					case "list":
+						value = envelope("list", []any{value})
+					case "map":
+						value = envelope("map", []any{[]any{"key", value}})
+					case "node":
+						value = envelope("node", map[string]any{
+							"id": int64(1), "labels": nil, "properties": []any{[]any{"key", value}},
+						})
+					case "relationship":
+						value = envelope("relationship", map[string]any{
+							"id": int64(2), "type": "LINK", "source_id": int64(1), "destination_id": int64(1),
+							"properties": []any{[]any{"key", value}},
+						})
+					case "path":
+						// A path's node adds a level; fill odd depths with a list.
+						if index+1 == depth {
+							value = envelope("list", []any{value})
+						} else {
+							value = envelope("path", map[string]any{
+								"nodes": []any{envelope("node", map[string]any{
+									"id": int64(1), "labels": nil, "properties": []any{[]any{"key", value}},
+								})},
+								"relationships": nil,
+							})
+							index++
+						}
+					}
+				}
+				_, err := DecodeResult(resultWithCells(value))
+				if depth <= 128 && err != nil {
+					t.Fatalf("core-accepted result depth %d rejected: %v", depth, err)
+				}
+				if depth > 128 && (err == nil || !strings.Contains(err.Error(), "bounded nesting depth")) {
+					t.Fatalf("result depth %d must be bounded: %v", depth, err)
+				}
+			})
+		}
+	}
+}
+
 func TestMalformedCanonicalGraphResults(t *testing.T) {
 	invalidCells := []any{
 		nil,
@@ -150,7 +244,7 @@ func TestMalformedCanonicalGraphResults(t *testing.T) {
 	for _, statistics := range []any{
 		nil,
 		map[string]any{},
-		map[string]any{"raw": nil, "labels_added": "1"},
+		map[string]any{"raw": nil, "labels_added": int64(-1)},
 		map[string]any{"raw": nil, "cached_execution": int64(1)},
 		map[string]any{"raw": nil, "execution_time_ms": "0"},
 		map[string]any{"raw": nil, "graph_version": int64(-1)},

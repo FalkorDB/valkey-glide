@@ -156,7 +156,8 @@ We run our tests using Go's `testing` package. For convenience, we bundled test 
 #### FalkorDB graph tests
 
 `make graph-test` is separate from all ordinary Valkey/module targets. The
-`falkordb` build tag prevents these tests from being discovered by `go test ./...`.
+`falkordb` build tag keeps server-backed graph tests out of `go test ./...`;
+untagged graph validation tests remain in the normal test packages.
 Start the digest-pinned `utils/falkordb_harness.py` harness, export its `host:port`
 endpoints as `FALKORDB_STANDALONE_ENDPOINT`, `FALKORDB_CLUSTER_ENDPOINT`, and
 `FALKORDB_REPLICA_ENDPOINT`, and run:
@@ -172,6 +173,8 @@ kind, schema resolution, read-only errors, database selection epochs, closed
 parents, pooled-handle rejection, in-flight cancellation, and positive server
 timeouts followed by successful reads. Expensive cancellation tests always use
 a bounded server timeout, and MONITOR verifies actual server dispatch.
+After cancellation, a successful recovery read is required within a bounded
+three-second interval rather than assuming late callbacks arrive after a sleep.
 The target also runs native ownership tests from the root package: garbage
 collection drops the Go handle's owned Rust context before a cancelled request's
 late callback, and dropping a context after its parent closes remains safe.
@@ -192,6 +195,13 @@ without a native build:
 
 ```bash
 CGO_ENABLED=0 go test -count=1 -cover ./internal/graph
+```
+
+Local graph-selection examples need no server (`SelectGraph` performs no network
+I/O and the examples use lazy clients):
+
+```bash
+go test -count=1 . -run '^Example(Client|ClusterClient)_SelectGraph$'
 ```
 
 #### Test Categories

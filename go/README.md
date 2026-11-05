@@ -70,28 +70,48 @@ FalkorDB graph commands require a FalkorDB-enabled server, not a plain Valkey
 server. Both standalone and cluster clients expose the same local graph handle:
 
 ```go
-graph, err := client.SelectGraph("people")
-if err != nil {
-    return err
-}
-result, err := graph.Query(
-    context.Background(),
-    "CREATE (p:Person {name: $name}) RETURN p",
-    options.NewGraphQueryOptions().SetParams(map[string]any{"name": "Ada"}),
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    glide "github.com/valkey-io/valkey-glide/go/v2"
+    "github.com/valkey-io/valkey-glide/go/v2/config"
+    "github.com/valkey-io/valkey-glide/go/v2/models"
+    "github.com/valkey-io/valkey-glide/go/v2/options"
 )
-if err != nil {
-    return err
+
+func main() {
+    client, err := glide.NewClient(config.NewClientConfiguration().
+        WithAddress(&config.NodeAddress{Host: "localhost", Port: 6379}))
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer client.Close()
+
+    graph, err := client.SelectGraph("people")
+    if err != nil {
+        log.Fatal(err)
+    }
+    result, err := graph.Query(
+        context.Background(),
+        "CREATE (p:Person {name: $name}) RETURN p",
+        options.NewGraphQueryOptions().SetParams(map[string]any{"name": "Ada"}),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    person := result.Rows[0][0].(models.GraphNode)
+    fmt.Println(person.Labels) // [Person]
 }
-person := result.Rows[0][0].(models.GraphNode)
-fmt.Println(person.Labels)
 ```
 
-Import `options` and `models` from
-`github.com/valkey-io/valkey-glide/go/v2/options` and
-`github.com/valkey-io/valkey-glide/go/v2/models`. Use `graph.ROQuery` for read-only
+Replace the address with your FalkorDB endpoint. Use `graph.ROQuery` for read-only
 queries. The Rust core owns graph-aware routing, operation-scoped schema
-resolution, and RESP2/RESP3 normalization; the Go binding only materializes its
-typed result.
+resolution, and RESP2/RESP3 normalization; the Go binding validates and encodes
+typed parameters and materializes the typed result.
 
 Parameters support nil, booleans, signed 64-bit integers (including their exact
 minimum and maximum), finite floats, UTF-8 strings, nested lists, and string-keyed
@@ -106,6 +126,7 @@ keys. Nodes, relationships, paths, points, and float32 vectors have dedicated
 models. Temporal wrappers retain the server's raw signed 64-bit values rather
 than making timezone or calendar assumptions. Statistics retain raw strings;
 optional typed fields distinguish absence from zero.
+Known statistic counters use `*uint64` to preserve the full unsigned 64-bit range.
 
 `SelectGraph` performs no network I/O and creates an owned shared Rust
 `GraphContext` with the client's database and selection epoch. The context is

@@ -194,7 +194,7 @@ graph-test:
 	@test -n "$$FALKORDB_STANDALONE_ENDPOINT" && test -n "$$FALKORDB_CLUSTER_ENDPOINT" && \
 		test -n "$$FALKORDB_REPLICA_ENDPOINT" || \
 		(echo "Set FALKORDB_STANDALONE_ENDPOINT, FALKORDB_CLUSTER_ENDPOINT, and FALKORDB_REPLICA_ENDPOINT"; exit 1)
-	go test -tags=falkordb -count=1 -v . ./graphTest/... $(if $(test-filter), -run $(test-filter), -run '^TestGraph')
+	go test -tags='falkordb$(if $(filter true,$(IS_MUSL)), musl)' -count=1 -v . ./graphTest/... $(if $(test-filter), -run $(test-filter), -run '^TestGraph')
 
 # pubsub tests - run pubsub tests using testify filter
 pubsub-test: export TEST_FILTER = -skip "TestGlideTestSuite/TestModule" -testify.m TestPubSub

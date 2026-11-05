@@ -88,7 +88,7 @@ func TestParameterRejectionIncludesPath(t *testing.T) {
 func TestParameterSharedValuesAndTypedCollections(t *testing.T) {
 	child := map[string]any{"value": int16(-2)}
 	params := map[string]any{
-		"first": child, "second": child, "array": [2]uint32{1, 2}, "float32": float32(0.5),
+		"first": child, "second": child, "array": [2]uint32{1, 2}, "float32": float32(0.1),
 		"nilList": []any(nil), "nilMap": map[string]any(nil),
 	}
 	request, err := NewRequest("g", "", 0, false, params, nil)
@@ -102,6 +102,65 @@ func TestParameterSharedValuesAndTypedCollections(t *testing.T) {
 		if request.Parameters.Entries[index-1].Key >= request.Parameters.Entries[index].Key {
 			t.Fatal("parameter map serialization must be deterministic")
 		}
+	}
+	integer := func(value int64) *protobuf.Parameter {
+		return &protobuf.Parameter{Value: &protobuf.Parameter_IntegerValue{IntegerValue: value}}
+	}
+	sharedMap := &protobuf.Parameter{Value: &protobuf.Parameter_MapValue{
+		MapValue: &protobuf.ParameterMap{Entries: []*protobuf.ParameterEntry{{Key: "value", Value: integer(-2)}}},
+	}}
+	want := &protobuf.ParameterMap{Entries: []*protobuf.ParameterEntry{
+		{Key: "array", Value: &protobuf.Parameter{Value: &protobuf.Parameter_ListValue{
+			ListValue: &protobuf.ParameterList{Values: []*protobuf.Parameter{integer(1), integer(2)}},
+		}}},
+		{Key: "first", Value: sharedMap},
+		{
+			Key:   "float32",
+			Value: &protobuf.Parameter{Value: &protobuf.Parameter_DoubleValue{DoubleValue: float64(float32(0.1))}},
+		},
+		{Key: "nilList", Value: &protobuf.Parameter{Value: &protobuf.Parameter_NullValue{NullValue: true}}},
+		{Key: "nilMap", Value: &protobuf.Parameter{Value: &protobuf.Parameter_NullValue{NullValue: true}}},
+		{Key: "second", Value: sharedMap},
+	}}
+	if !proto.Equal(request.Parameters, want) {
+		t.Fatalf("typed collections changed:\ngot  %v\nwant %v", request.Parameters, want)
+	}
+	child["value"] = int16(9)
+	first, second := request.Parameters.Entries[1].Value, request.Parameters.Entries[5].Value
+	if first == second || first.GetMapValue() == second.GetMapValue() ||
+		first.GetMapValue().Entries[0].Value.GetIntegerValue() != -2 ||
+		second.GetMapValue().Entries[0].Value.GetIntegerValue() != -2 {
+		t.Fatal("shared maps must be independently encoded snapshots")
+	}
+}
+
+func TestParameterOverlappingSlicesAndCycles(t *testing.T) {
+	overlap := make([]any, 2)
+	overlap[0] = int64(1)
+	overlap[1] = overlap[:1]
+	request, err := NewRequest("g", "RETURN $list", 0, false, map[string]any{"list": overlap}, nil)
+	if err != nil {
+		t.Fatalf("acyclic overlapping subslice rejected: %v", err)
+	}
+	list := request.Parameters.Entries[0].Value.GetListValue().Values
+	if len(list) != 2 || list[0].GetIntegerValue() != 1 ||
+		len(list[1].GetListValue().Values) != 1 || list[1].GetListValue().Values[0].GetIntegerValue() != 1 {
+		t.Fatalf("overlapping slice did not encode as [1, [1]]: %v", request.Parameters)
+	}
+	overlap[1] = overlap[:0]
+	if _, err := NewRequest("g", "", 0, false, map[string]any{"list": overlap}, nil); err != nil {
+		t.Fatalf("empty overlapping subslice rejected: %v", err)
+	}
+	overlap[1] = overlap
+	if _, err := NewRequest("g", "", 0, false, map[string]any{"list": overlap}, nil); err == nil ||
+		!strings.Contains(err.Error(), `$["list"][1]: cyclic list`) {
+		t.Fatalf("true slice cycle must be rejected at its path: %v", err)
+	}
+	overlap[0] = overlap[:1]
+	overlap[1] = nil
+	if _, err := NewRequest("g", "", 0, false, map[string]any{"list": overlap}, nil); err == nil ||
+		!strings.Contains(err.Error(), `$["list"][0][0]: cyclic list`) {
+		t.Fatalf("cycle through a shorter view must still be rejected: %v", err)
 	}
 }
 

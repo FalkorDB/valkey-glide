@@ -141,16 +141,26 @@ func TestGraphInFlightCancellationAndServerTimeout(t *testing.T) {
 	}
 	awaitBoundedCompletion := func(t *testing.T) {
 		t.Helper()
-		// Cancelling the Go wait does not cancel native execution. Every expensive
-		// query has TIMEOUT 100, so allow its bounded late callback to arrive.
-		timer := time.NewTimer(150 * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
+		// Cancellation abandons the Go wait, not native execution. A successful
+		// read is the recovery barrier, including delayed timeout callbacks.
+		recoveryContext, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			result, err := graph.ROQuery(recoveryContext, "RETURN 7 AS value", nil)
+			if err == nil {
+				if !reflect.DeepEqual(result.Rows, [][]any{{int64(7)}}) {
+					t.Fatalf("recovery read returned unexpected rows: %+v", result)
+				}
+				return
+			}
+			select {
+			case <-ticker.C:
+			case <-recoveryContext.Done():
+				t.Fatalf("graph did not recover after abandoned query: %v (last read: %v)", recoveryContext.Err(), err)
+			}
 		}
-		assertHealthy(t)
 	}
 	t.Run("cancel_after_server_dispatch", func(t *testing.T) {
 		queryContext, cancel := context.WithCancel(ctx)

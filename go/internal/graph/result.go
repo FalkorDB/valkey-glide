@@ -10,6 +10,8 @@ import (
 	"github.com/valkey-io/valkey-glide/go/v2/models"
 )
 
+const maxResultDepth = 128
+
 func resultError(path, expected string) error {
 	return fmt.Errorf("invalid canonical graph result at %s: expected %s", path, expected)
 }
@@ -48,6 +50,21 @@ func asInt(value any, path string) (int64, error) {
 		return 0, resultError(path, "signed 64-bit integer")
 	}
 	return result, nil
+}
+
+func asUint(value any, path string) (uint64, error) {
+	switch value := value.(type) {
+	case int64:
+		if value >= 0 {
+			return uint64(value), nil
+		}
+	case string:
+		number, err := strconv.ParseUint(value, 10, 64)
+		if err == nil {
+			return number, nil
+		}
+	}
+	return 0, resultError(path, "unsigned 64-bit integer")
 }
 
 func asDouble(value any, path string) (float64, error) {
@@ -119,7 +136,7 @@ func DecodeResult(value any) (*models.GraphResult, error) {
 }
 
 func decodeValue(value any, path string, depth int) (any, error) {
-	if depth > maxParameterDepth {
+	if depth > maxResultDepth {
 		return nil, resultError(path, "bounded nesting depth")
 	}
 	envelope, err := asMap(value, path)
@@ -353,7 +370,7 @@ func decodeStatistics(value any) (models.GraphStatistics, error) {
 	result := models.GraphStatistics{Raw: raw}
 	counters := []struct {
 		name   string
-		target **int64
+		target **uint64
 	}{
 		{"labels_added", &result.LabelsAdded},
 		{"labels_removed", &result.LabelsRemoved},
@@ -365,10 +382,11 @@ func decodeStatistics(value any) (models.GraphStatistics, error) {
 		{"relationships_deleted", &result.RelationshipsDeleted},
 		{"indices_created", &result.IndicesCreated},
 		{"indices_deleted", &result.IndicesDeleted},
+		{"graph_version", &result.GraphVersion},
 	}
 	for _, counter := range counters {
 		if value, ok := fields[counter.name]; ok {
-			number, err := asInt(value, "$.statistics."+counter.name)
+			number, err := asUint(value, "$.statistics."+counter.name)
 			if err != nil {
 				return models.GraphStatistics{}, err
 			}
@@ -388,24 +406,6 @@ func decodeStatistics(value any) (models.GraphStatistics, error) {
 			return models.GraphStatistics{}, err
 		}
 		result.ExecutionTimeMs = &number
-	}
-	if value, ok := fields["graph_version"]; ok {
-		var version uint64
-		switch value := value.(type) {
-		case int64:
-			if value < 0 {
-				return models.GraphStatistics{}, resultError("$.statistics.graph_version", "unsigned 64-bit integer")
-			}
-			version = uint64(value)
-		case string:
-			version, err = strconv.ParseUint(value, 10, 64)
-			if err != nil {
-				return models.GraphStatistics{}, resultError("$.statistics.graph_version", "unsigned 64-bit integer")
-			}
-		default:
-			return models.GraphStatistics{}, resultError("$.statistics.graph_version", "unsigned 64-bit integer")
-		}
-		result.GraphVersion = &version
 	}
 	return result, nil
 }
