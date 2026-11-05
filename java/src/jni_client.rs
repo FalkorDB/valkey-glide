@@ -381,6 +381,15 @@ fn get_callback_worker_threads() -> usize {
     }
 }
 
+fn callback_thread_builder(index: usize) -> thread::Builder {
+    thread::Builder::new()
+        .name(format!("glide-jni-callback-{index}"))
+        .stack_size(
+            glide_core::client::configured_thread_stack_size()
+                .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+        )
+}
+
 pub fn init_callback_workers() -> &'static Sender<CallbackJob> {
     CALLBACK_SENDER.get_or_init(|| {
         let (tx, rx) = channel::<CallbackJob>();
@@ -389,8 +398,7 @@ pub fn init_callback_workers() -> &'static Sender<CallbackJob> {
 
         for i in 0..worker_threads {
             let rx_clone = Arc::clone(&rx);
-            thread::Builder::new()
-                .name(format!("glide-jni-callback-{i}"))
+            callback_thread_builder(i)
                 .spawn(move || {
                     // Pre-attach to JVM once at thread start. attach_current_thread_as_daemon
                     // keeps the thread attached for its entire lifetime (no detach on drop).
@@ -1068,9 +1076,30 @@ pub fn complete_error_sync(
 
 #[cfg(test)]
 mod tests {
+    use super::callback_thread_builder;
     use super::generate_safe_handle;
     use super::serialize_array_to_bytes;
     use redis::{Value, parse_redis_value};
+
+    #[test]
+    fn callback_worker_stack_supports_ordinary_deep_value_destruction() {
+        callback_thread_builder(0)
+            .spawn(|| {
+                let mut value = Value::Nil;
+                for depth in 0..512 {
+                    value = if depth % 2 == 0 {
+                        Value::Array(vec![value])
+                    } else {
+                        Value::Map(vec![(Value::Nil, value)])
+                    };
+                }
+                std::hint::black_box(&value);
+                drop(value);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
     fn ordinary_handles_and_pooled_ids_never_collide() {

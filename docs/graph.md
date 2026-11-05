@@ -76,9 +76,10 @@ changes to ordinary command response shapes.
 Nested Rust values still have recursive ordinary destruction. End-to-end deep
 processing requires **at least 2 MiB of native thread stack**, including result
 destruction and error/cancellation cleanup. GLIDE-owned runtime workers enforce
-this minimum and preserve larger `RUST_MIN_STACK` settings. Node's existing
-pinned-worker pool cannot override thread stacks, so creating it with an explicit
-smaller setting fails instead of starting unsupported workers. Configure
+this minimum and preserve larger `RUST_MIN_STACK` settings, including JNI
+callback workers. The existing Node and legacy socket-listener pinned pools
+cannot override thread stacks, so creating them with an explicit smaller setting
+fails before opening a listener or starting unsupported workers. Configure
 `RUST_MIN_STACK` before any Rust threads start; changing it later is unsupported
 because Rust caches that setting.
 
