@@ -64,6 +64,12 @@ reject cycles, unsupported objects, integer overflow and nonfinite numbers.
 Parameter errors identify the offending path. Keys use validated quoted
 identifiers, not general-purpose object stringification.
 
+Shared parameter and result processing permits up to 128 logical nesting levels;
+bindings may impose a stricter input limit. Compact graph values add RESP
+envelopes around those levels. The asynchronous wire decoder therefore uses a
+bounded 512-aggregate iterative builder, without recursive parser stack growth or
+changes to ordinary command response shapes.
+
 Pass date/time/point/vector inputs as supported scalars or lists into Cypher
 constructors. Arbitrary native objects, graph entities, and native temporal
 objects are not implicitly serialized. Graph names and query text cannot contain
