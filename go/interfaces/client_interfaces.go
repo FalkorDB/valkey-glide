@@ -22,6 +22,7 @@ type BaseClientCommands interface {
 	GeoSpatialCommands
 	ScriptingAndFunctionBaseCommands
 	PubSubCommands
+	GraphCommands
 
 	Watch(ctx context.Context, keys []string) (string, error)
 	Unwatch(ctx context.Context) (string, error)

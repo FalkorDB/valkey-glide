@@ -57,6 +57,7 @@ make unit-test                          # Unit tests only
 make example-test                       # Runnable examples
 make integ-test                         # Integration tests (excludes modules)
 make modules-test                       # Module-specific tests
+make graph-test                         # Separate FalkorDB harness/endpoints; never plain Valkey
 make pubsub-test                        # PubSub functionality tests
 make long-timeout-test                  # Tests with extended timeouts
 make opentelemetry-test                 # OpenTelemetry integration tests
@@ -95,6 +96,7 @@ golines -w --shorten-comments -m 127 .
 protoc --proto_path=../glide-core/src/protobuf \
   --go_opt=Mconnection_request.proto=github.com/valkey-io/valkey-glide/go/v2/internal/protobuf \
   --go_opt=Mcommand_request.proto=github.com/valkey-io/valkey-glide/go/v2/internal/protobuf \
+  --go_opt=Mgraph_request.proto=github.com/valkey-io/valkey-glide/go/v2/internal/protobuf \
   --go_opt=Mresponse.proto=github.com/valkey-io/valkey-glide/go/v2/internal/protobuf \
   --go_opt=paths=source_relative --go_out=./internal/protobuf \
   ../glide-core/src/protobuf/*.proto
@@ -105,6 +107,17 @@ protoc --proto_path=../glide-core/src/protobuf \
 `make integ-test`, `make pubsub-test` etc. **auto-start** standalone + cluster servers via `utils/cluster_manager.py` and stop them afterward — nothing to start manually. **`make modules-test` is the exception:** it needs module-enabled servers `cluster_manager.py` doesn't provide, so `standalone-endpoints=`/`cluster-endpoints=` are **mandatory** there (CI starts them via Docker). The endpoint args on the non-module targets are only for pointing at a server you started yourself; see the root [../AGENTS.md](../AGENTS.md) "Test Servers" section. A `valkey-server`/`redis-server` on `PATH` is required either way. Note: the integration suite's `SetupSuite` stops every `cluster*` folder under `utils/clusters/` before starting fresh ones — including clusters left behind by an interrupted earlier run, so a crashed run self-heals on the next invocation but a concurrently-running suite's clusters can be caught too.
 
 ### Test Execution Options
+
+FalkorDB graph conformance is separately build-tagged (`falkordb`) and does not
+run in plain Valkey or module jobs. Start the digest-pinned
+`utils/falkordb_harness.py` harness and export its `host:port` endpoints as
+`FALKORDB_STANDALONE_ENDPOINT`, `FALKORDB_CLUSTER_ENDPOINT`, and
+`FALKORDB_REPLICA_ENDPOINT`, then run `make graph-test`. The target requires all
+three endpoints for explicit RESP2/RESP3 standalone, cluster, and monitored
+configured-replica coverage. Each test uses and removes only its unique graph key.
+Pure typed-parameter/canonical-result tests also run without the native library:
+`CGO_ENABLED=0 go test ./internal/graph`.
+
 ```bash
 # Run with specific test filter
 make integ-test test-filter=TestSet

@@ -126,6 +126,7 @@ generate-protobuf:
 	protoc --proto_path=$(GLIDE_CORE_PATH)/src/protobuf \
 		--go_opt=Mconnection_request.proto=github.com/valkey-io/valkey-glide/go/v2/internal/protobuf \
 		--go_opt=Mcommand_request.proto=github.com/valkey-io/valkey-glide/go/v2/internal/protobuf \
+		--go_opt=Mgraph_request.proto=github.com/valkey-io/valkey-glide/go/v2/internal/protobuf \
 		--go_opt=Mresponse.proto=github.com/valkey-io/valkey-glide/go/v2/internal/protobuf \
 		--go_out=./internal/protobuf \
 		--go_opt=paths=source_relative \
@@ -186,6 +187,14 @@ integ-test: __it
 # modules tests - run substask with default filter
 modules-test: export TEST_FILTER = $(if $(test-filter), -run $(test-filter), -testify.m TestModule)
 modules-test: __it
+
+# FalkorDB has a separate harness and build tag; plain Valkey/module jobs never
+# discover these tests. The harness owns endpoints and per-test graph cleanup.
+graph-test:
+	@test -n "$$FALKORDB_STANDALONE_ENDPOINT" && test -n "$$FALKORDB_CLUSTER_ENDPOINT" && \
+		test -n "$$FALKORDB_REPLICA_ENDPOINT" || \
+		(echo "Set FALKORDB_STANDALONE_ENDPOINT, FALKORDB_CLUSTER_ENDPOINT, and FALKORDB_REPLICA_ENDPOINT"; exit 1)
+	go test -tags=falkordb -count=1 -v . ./graphTest/... $(if $(test-filter), -run $(test-filter), -run '^TestGraph')
 
 # pubsub tests - run pubsub tests using testify filter
 pubsub-test: export TEST_FILTER = -skip "TestGlideTestSuite/TestModule" -testify.m TestPubSub

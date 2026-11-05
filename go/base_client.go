@@ -71,10 +71,11 @@ type clientConfiguration interface {
 }
 
 type baseClient struct {
-	pending        map[uintptr]struct{}
-	coreClient     unsafe.Pointer
-	mu             *sync.Mutex
-	messageHandler *MessageHandler
+	graphUnsupported bool // pool adapters cannot safely outlive their borrowed lease
+	pending          map[uintptr]struct{}
+	coreClient       unsafe.Pointer
+	mu               *sync.Mutex
+	messageHandler   *MessageHandler
 	// resolverID is the shared callback ID used for both the address-resolver and the
 	// credential-provider callbacks. Both are registered under the same clientID, so a
 	// single field suffices; no separate credentialProviderID is needed.

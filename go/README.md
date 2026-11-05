@@ -64,6 +64,64 @@ export GOFLAGS := -tags=musl
 
 ## Basic Examples
 
+### FalkorDB graphs
+
+FalkorDB graph commands require a FalkorDB-enabled server, not a plain Valkey
+server. Both standalone and cluster clients expose the same local graph handle:
+
+```go
+graph, err := client.SelectGraph("people")
+if err != nil {
+    return err
+}
+result, err := graph.Query(
+    context.Background(),
+    "CREATE (p:Person {name: $name}) RETURN p",
+    options.NewGraphQueryOptions().SetParams(map[string]any{"name": "Ada"}),
+)
+if err != nil {
+    return err
+}
+person := result.Rows[0][0].(models.GraphNode)
+fmt.Println(person.Labels)
+```
+
+Import `options` and `models` from
+`github.com/valkey-io/valkey-glide/go/v2/options` and
+`github.com/valkey-io/valkey-glide/go/v2/models`. Use `graph.ROQuery` for read-only
+queries. The Rust core owns graph-aware routing, operation-scoped schema
+resolution, and RESP2/RESP3 normalization; the Go binding only materializes its
+typed result.
+
+Parameters support nil, booleans, signed 64-bit integers (including their exact
+minimum and maximum), finite floats, UTF-8 strings, nested lists, and string-keyed
+maps. Unsupported objects, temporal/entity wrappers, overflow, and cycles return
+errors with the offending parameter path. No JSON or binding-side query
+interpolation is used. `SetTimeout` takes nonnegative milliseconds; an omitted
+timeout differs from an explicit zero, and the server validates its range.
+
+`GraphResult` preserves duplicate column names and ordered rows. Maps and entity
+properties use `models.GraphMap` (ordered key/value entries) to preserve duplicate
+keys. Nodes, relationships, paths, points, and float32 vectors have dedicated
+models. Temporal wrappers retain the server's raw signed 64-bit values rather
+than making timezone or calendar assumptions. Statistics retain raw strings;
+optional typed fields distinguish absence from zero.
+
+`SelectGraph` performs no network I/O and creates an owned shared Rust
+`GraphContext` with the client's database and selection epoch. The context is
+automatically released by Go's garbage collector; pending native requests retain
+their own context clones independently of the Go handle. Any later `SELECT`
+attempt invalidates existing graph handles,
+even when changing away and back. Select a new handle after successful database
+selection. A graph retains but does not close its parent; queries reject a closed
+parent. Pool-borrowed clients cannot select graphs because a handle could outlive
+its lease. Graph handles do not need a separate `Close`.
+`IsolatedScope` does not expose graph selection or return a parent client, so
+typed graph handles cannot escape a scope's release.
+
+Graph conformance tests are isolated from ordinary Valkey and module jobs. See
+`make graph-test` in the [developer guide](DEVELOPER.md).
+
 
 ### Standalone Example:
 
