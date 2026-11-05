@@ -20,6 +20,92 @@ See GLIDE's Node.js [documentation site](https://glide.valkey.io/languages/nodej
 
 Refer to the [Supported Engine Versions table](https://github.com/valkey-io/valkey-glide/blob/main/README.md#supported-engine-versions) for details.
 
+## Typed FalkorDB graphs
+
+The additive graph API targets FalkorDB **v6.0.3**. It is separate from ordinary
+Valkey commands and requires a FalkorDB server; compile-only checks do not establish
+compatibility with other FalkorDB versions.
+
+```typescript
+import { GlideClient, GraphNode } from "@valkey/valkey-glide";
+
+const client = await GlideClient.createClient({
+    addresses: [{ host: "localhost", port: 6379 }],
+});
+
+try {
+    // Local selection: no network request and no additional connection.
+    const graph = client.selectGraph("people");
+    const result = await graph.query(
+        "CREATE (n:Person {name:$name,externalId:$id}) RETURN n",
+        { params: { name: "Ada", id: 9007199254740993n }, timeoutMs: 1000 },
+    );
+    const node = result.rows[0][0];
+
+    if (node instanceof GraphNode) {
+        console.log(node.id, node.properties.get("name"));
+    }
+
+    await graph.roQuery("MATCH (n:Person) RETURN n.name");
+} finally {
+    client.close();
+}
+```
+
+`query` and `roQuery` return `GraphQueryResult` with ordered `columns`, ordered
+`rows`, and `statistics`. Duplicate column names are preserved. Graph integers,
+entity IDs and statistic counters are always `bigint`; ordinary command number
+conversion is unchanged. `GraphMap.entries` preserves map ordering and duplicate
+keys, and `.get(key)` returns the first matching value.
+
+The sixteen graph value kinds include native scalar values and lists,
+`GraphMap`, `GraphNode`, `GraphRelationship`, `GraphPath`, `GraphPoint`,
+`GraphVector`, `GraphDateTime`, `GraphDate`, `GraphTime`, and `GraphDuration`.
+Temporal wrappers retain the exact engine `bigint` in `.value`, without
+JavaScript `Date`, timezone, or millisecond conversion. Vectors preserve the
+engine's float32 elements widened to JavaScript numbers. Known statistics are
+optional; `statistics.raw` retains unrecognized server statistics.
+
+Parameters accept null, booleans, well-formed Unicode strings, finite numbers,
+signed-64-bit `bigint`, dense arrays and plain nested objects. Use `bigint` for
+integers beyond JavaScript's safe integer range. Cycles, accessors, symbols,
+native objects (including `Date`, `Map`, buffers), graph entities and nonfinite
+numbers are rejected before dispatch. Query parameters remain separate from
+query text; the shared Rust core performs Cypher literal serialization.
+`timeoutMs` is an optional nonnegative safe integer server-side timeout, separate
+from the client's overall request timeout; explicit zero is preserved.
+Server-reported graph timeout expiration is a `RequestError`, distinct from a
+client-side request deadline reported as `TimeoutError`.
+
+A graph handle retains its parent client and selected database generation.
+Its opaque native handle owns the Rust graph context; in-flight requests clone
+that context before dispatch, and garbage collection releases handle ownership.
+Closing the parent or attempting `SELECT` invalidates existing graph handles,
+even when selecting away and back. Select a fresh graph after a successful
+database change. Borrowed pool clients and isolated scopes do not expose usable
+graph handles.
+
+Graph-specific validation is isolated from plain-Valkey jobs:
+
+```bash
+cd node
+npm run build-protobuf
+npm run test:graph-unit
+# After building the native addon:
+npm run test:graph-native
+# After building the native addon, point at the pinned harness endpoints:
+FALKORDB_STANDALONE_ENDPOINT=127.0.0.1:6379 \
+FALKORDB_REPLICA_ENDPOINT=127.0.0.1:6380 \
+FALKORDB_CLUSTER_ENDPOINT=127.0.0.1:7000 npm run test:graph
+```
+
+The dedicated conformance target covers the shared recorded dataset under
+RESP2/RESP3 in standalone/cluster mode, exact integers, schema recreation,
+concurrency, close and pool/database lifetimes. Configured-replica read tests
+observe the entity query and dictionary queries on the replica's MONITOR stream
+under both protocols. See
+`../utils/falkordb_harness.py` for digest-pinned endpoint provisioning.
+
 # Getting Started - Node Wrapper
 
 ## System Requirements

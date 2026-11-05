@@ -90,6 +90,9 @@ npm test                        # Standard tests (excludes server modules)
 npm run test:debug              # All suites incl. ServerModules, serial (--runInBand)
 npm run test:minimum            # Serial; skips GlideJson/GlideFt/pubsub/kill tests
 npm run test:modules            # Serial; only GlideJson/GlideFt tests (needs a modules-enabled server)
+npm run test:graph-unit         # Local typed-graph validation (no native addon/server required)
+npm run test:graph-native       # Built-package graph callback/lifetime regression tests (no server)
+npm run test:graph              # Dedicated FalkorDB v6.0.3 conformance; requires standalone, replica and cluster FALKORDB_*_ENDPOINT variables
 
 # Linting and Formatting
 npm run lint                    # Check code quality (ESLint + Prettier)
