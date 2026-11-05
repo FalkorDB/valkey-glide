@@ -71,7 +71,25 @@ async fn attempt(
 async fn run(connection: &mut MultiplexedConnection, arguments: &[&str]) -> Value {
     attempt(connection, arguments)
         .await
-        .unwrap_or_else(|error| panic!("admin command {arguments:?} failed: {error}"))
+        .unwrap_or_else(|error| panic!("{}", admin_failure_message(&error)))
+}
+
+fn admin_failure_message(error: &redis::RedisError) -> String {
+    format!("admin command failed: {:?}", error.kind())
+}
+
+#[test]
+fn admin_failures_do_not_log_server_credentials() {
+    let error = redis::RedisError::from((
+        ErrorKind::ResponseError,
+        "ACL failure",
+        "private-test-username private-test-password".to_owned(),
+    ));
+    assert!(error.to_string().contains("private-test-password"));
+    assert_eq!(
+        admin_failure_message(&error),
+        "admin command failed: ResponseError"
+    );
 }
 
 fn text(value: &Value) -> String {
