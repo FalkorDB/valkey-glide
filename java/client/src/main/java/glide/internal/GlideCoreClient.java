@@ -70,6 +70,20 @@ public class GlideCoreClient implements AutoCloseable {
         onNativeInit();
     }
 
+    static PhantomReference<Object> registerNativeCleanup(Object owner, Runnable action) {
+        PhantomReference<Object> reference = new PhantomReference<>(owner, CLEANUP_QUEUE);
+        CLEANUP_ACTIONS.put(reference, action);
+        return reference;
+    }
+
+    static void runNativeCleanup(PhantomReference<?> reference) {
+        Runnable action = CLEANUP_ACTIONS.remove(reference);
+        if (action != null) {
+            action.run();
+        }
+        reference.clear();
+    }
+
     private static native void onNativeInit();
 
     private static native void freeNativeBuffer(long id);
@@ -210,6 +224,54 @@ public class GlideCoreClient implements AutoCloseable {
     }
 
     // ==================== COMMAND EXECUTION METHODS ====================
+
+    /** Retain a selected Rust context locally, without connecting or issuing a command. */
+    public NativeGraphContext selectGraphContext(String name) {
+        long handle = nativeClientHandle.get();
+        if (handle == 0) {
+            throw new glide.api.models.exceptions.ClosingException("Client is closed");
+        }
+        return NativeGraphContext.select(this, handle, name);
+    }
+
+    /**
+     * Execute a graph-only protobuf request with normal backpressure, timeout, and close handling.
+     */
+    public CompletableFuture<Object> executeGraphQueryAsync(
+            NativeGraphContext context, byte[] request) {
+        CompletableFuture<Object> future = new CompletableFuture<>();
+        CompletableFuture<Void> cleanup = new CompletableFuture<>();
+        // CompletableFuture dependents run LIFO. Expose completion only after registry cleanup.
+        CompletableFuture<Object> completed = cleanup.thenCompose(ignored -> future);
+        boolean registered = false;
+        try {
+            long handle = nativeClientHandle.get();
+            if (handle == 0) {
+                throw new glide.api.models.exceptions.ClosingException("Client is closed");
+            }
+            long correlationId =
+                    AsyncRegistry.register(
+                            future,
+                            maxInflightRequests,
+                            handle,
+                            inflightCounterKey,
+                            requestTimeoutMillis,
+                            cleanup);
+            registered = correlationId != 0;
+            if (registered) {
+                context.dispatch(this, handle, correlationId, request);
+            } else {
+                cleanup.complete(null);
+            }
+        } catch (Exception | LinkageError e) {
+            // AsyncRegistry's completion hook also cleans up a synchronous JNI dispatch failure.
+            future.completeExceptionally(e);
+            if (!registered) {
+                cleanup.complete(null);
+            }
+        }
+        return completed;
+    }
 
     /** Execute a batch of commands asynchronously via JNI. */
     public CompletableFuture<Object> executeBatchAsync(

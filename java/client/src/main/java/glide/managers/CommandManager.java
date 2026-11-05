@@ -26,6 +26,7 @@ import glide.api.models.exceptions.RequestException;
 import glide.ffi.resolvers.ClusterScanCursorResolver;
 import glide.ffi.resolvers.OpenTelemetryResolver;
 import glide.internal.GlideCoreClient;
+import glide.internal.NativeGraphContext;
 import glide.utils.Java8Utils;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -65,6 +66,22 @@ public class CommandManager {
 
     public CommandManager(GlideCoreClient coreClient) {
         this.coreClient = coreClient;
+    }
+
+    /** Select and retain a native graph context without issuing a command. */
+    public NativeGraphContext selectGraphContext(String name) {
+        return coreClient.selectGraphContext(name);
+    }
+
+    /** Submit a canonical graph request; graph decoding is exclusively owned by the core. */
+    public CompletableFuture<Object> submitGraphQuery(NativeGraphContext context, byte[] request) {
+        if (!coreClient.isConnected()) {
+            CompletableFuture<Object> failure = new CompletableFuture<>();
+            failure.completeExceptionally(
+                    new ClosingException("Client closed: Unable to submit graph query."));
+            return failure;
+        }
+        return coreClient.executeGraphQueryAsync(context, request);
     }
 
     /**

@@ -90,6 +90,7 @@ tasks.register('protobuf', Exec) {
         '--java_out=java/client/src/main/java/glide/models/protobuf',
         'glide-core/src/protobuf/connection_request.proto',
         'glide-core/src/protobuf/command_request.proto',
+        'glide-core/src/protobuf/graph_request.proto',
         'glide-core/src/protobuf/response.proto'
     workingDir Paths.get(project.rootDir.path, '..').toFile()
 }
@@ -184,9 +185,15 @@ tasks.register('copyNativeLib', Copy) {
         sourceDir = "${projectDir}/../target/release/"
     }
     
+    // Reuse a coordinated debug build without triggering a second native target/release build.
+    if (project.hasProperty('nativeLibDir')) {
+        sourceDir = project.nativeLibDir
+    }
+
     from sourceDir
     include "*.dylib", "*.so", "*.dll"
     into "${sourceSets.main.output.resourcesDir}/${jarPath}"
+    mustRunAfter processResources
 }
 
 // Task for uber JAR: copy all platform native libraries
@@ -233,6 +240,41 @@ if (System.getenv("UBER_JAR_BUILD") == "true") {
 }
 
 test.dependsOn('buildRust')
+
+test {
+    useJUnitPlatform {
+        excludeTags 'falkordb'
+    }
+}
+
+// Dedicated pinned FalkorDB tests never run as part of ordinary Valkey/module test jobs.
+tasks.register('graphTest', Test) {
+    description = 'Run typed graph conformance against the pinned FalkorDB harness endpoints'
+    group = 'verification'
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
+    dependsOn 'testClasses', 'copyNativeLib'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    // Keep JNI library extraction inside this checkout rather than the host's shared temp directory.
+    def nativeTempDir = layout.buildDirectory.dir('graph-native').get().asFile
+    systemProperty 'java.io.tmpdir', nativeTempDir.absolutePath
+    systemProperty 'falkordb.monitor.script', new File(rootProject.projectDir.parentFile, 'utils/falkordb_monitor.py').absolutePath
+    useJUnitPlatform {
+        includeTags 'falkordb'
+    }
+    doFirst {
+        nativeTempDir.mkdirs()
+        if (System.getenv('GLIDE_DOCKER_SERVERS') != 'true') {
+            throw new GradleException('graphTest requires GLIDE_DOCKER_SERVERS=true to avoid global server cleanup')
+        }
+        ['FALKORDB_STANDALONE_ENDPOINT', 'FALKORDB_REPLICA_ENDPOINT', 'FALKORDB_CLUSTER_ENDPOINT'].each { name ->
+            if (!System.getenv(name)) {
+                throw new GradleException("graphTest requires ${name} from the pinned utils/falkordb harness")
+            }
+        }
+    }
+}
 
 sourceSets {
     main {

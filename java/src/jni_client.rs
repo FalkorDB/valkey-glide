@@ -38,6 +38,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut c_void) -> jint {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn JNI_OnUnload(_vm: *const JavaVM, _reserved: *const c_void) {
+    crate::graph::clear_contexts();
     // Clean up global references by setting cached Options to None
     // This triggers Drop on GlobalRef objects, which calls delete_global_ref
     // Note: All cache functions use unsafe transmute to return static references

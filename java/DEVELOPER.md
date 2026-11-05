@@ -385,6 +385,49 @@ To run server modules test (it doesn't start servers):
 ./gradlew :integTest:modulesTest -Dcluster-endpoints=localhost:7000 -Dtls=true
 ```
 
+#### FalkorDB Graph Conformance
+
+Graph tests are isolated from ordinary Valkey and module jobs. Start the immutable pinned
+FalkorDB harness described in `../utils/falkordb_harness.py`, then export its
+`FALKORDB_STANDALONE_ENDPOINT`, `FALKORDB_REPLICA_ENDPOINT` and `FALKORDB_CLUSTER_ENDPOINT`
+values (each `host:port`).
+The dedicated suite tests standalone and cluster clients under both RESP2 and RESP3, all
+sixteen graph value kinds, exact signed integers, typed parameters, schema changes, read-only
+errors and client/database lifetime. Entity queries run with one inflight slot to verify metadata
+admission is released correctly. Additional RESP2/RESP3 cases reject graph selection through pooled
+clients during a lease, after release and on reuse. Isolated scopes expose no graph-selection API.
+Ownership tests cover native context release, shared operation clones, the existing phantom cleanup
+worker, parent-close resource release, and live completion after the Java selection is released.
+Graph-only completion tests force dependent requests to run immediately after success and failure,
+verifying registry cleanup releases a one-slot inflight limit before exposing completion. Dedicated
+one-slot entity tests keep that graph transport coverage separate from ordinary command sequencing.
+Configured-replica tests use both primary and replica addresses with `PREFER_REPLICA`. The shared
+`falkordb_monitor.py` helper proves the read-only entity query and all three schema dictionary reads
+execute exactly once on the same replica connection, under both client protocols, without writes.
+The suite uses unique graph keys and never flushes the server.
+
+```bash
+# Required on shared hosts: disables the unrelated global server-cleanup hook.
+export GLIDE_DOCKER_SERVERS=true
+./gradlew :client:graphTest
+
+# Fast Java-only graph unit tests. The ordinary task excludes tagged live graph tests.
+./gradlew :client:test --tests 'glide.api.GraphTest' \
+  --tests 'glide.api.models.graph.GraphQueryOptionsTest' \
+  --tests 'glide.internal.GraphResponseMapperTest'
+```
+
+The unit tests cover serialization and canonical-result materialization without a server.
+If validating Java-only edits against an already prepared native artifact, append
+`-x :client:buildRust`; this does **not** validate the JNI bridge or replace a native/live run.
+To reuse a shared debug JNI build, also pass `-PnativeLibDir=/absolute/path/to/target/debug`.
+This lets `copyNativeLib` package the artifact after resource processing; manually copying into
+`client/build/resources/main` before Gradle runs is not sufficient because resource processing
+can remove those outputs.
+`graphTest` fails clearly when the harness endpoints or `GLIDE_DOCKER_SERVERS=true` are missing.
+It always executes against the live topology rather than reusing cached or up-to-date test results.
+Stop only the harness state you started, never globally clean shared servers.
+
 #### IAM Authentication Tests
 
 To run [IAM authentication tests](integTest/src/test/java/glide/AuthTest.java) locally, set the following environment variables:

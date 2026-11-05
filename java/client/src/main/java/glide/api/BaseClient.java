@@ -463,6 +463,22 @@ public abstract class BaseClient
     protected final MessageHandler messageHandler;
     protected final Optional<BaseSubscriptionConfiguration> subscriptionConfiguration;
 
+    /**
+     * Select a local FalkorDB graph handle. This does not connect, create a graph, or issue a
+     * command. The handle retains this client and its current selected database; changing databases
+     * invalidates the handle. Pooled leases cannot produce graph handles.
+     *
+     * @param name graph key, including any cluster hash tag
+     * @return graph bound to this client and the current database
+     */
+    public Graph selectGraph(String name) {
+        java.util.Objects.requireNonNull(name, "name");
+        if (name.isEmpty()) {
+            throw new IllegalArgumentException("Graph name must not be empty");
+        }
+        return new Graph(this, commandManager, commandManager.selectGraphContext(name));
+    }
+
     // Native library loading
     static {
         try {

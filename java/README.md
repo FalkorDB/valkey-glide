@@ -348,6 +348,64 @@ public class Main {
 }
 ```
 
+## Typed FalkorDB graphs
+
+The standalone and cluster clients expose `selectGraph(name)`, which creates only a local
+handle: it does not connect, create a graph, or issue a server command. Query execution requires
+a FalkorDB-enabled server; an ordinary Valkey server does not implement these commands.
+
+```java
+import glide.api.Graph;
+import glide.api.models.graph.GraphQueryOptions;
+import glide.api.models.graph.GraphQueryResult;
+import java.util.Collections;
+
+Graph graph = client.selectGraph("people:{tenant}");
+GraphQueryResult result =
+        graph.query(
+                        "CREATE (p:Person {name:$name}) RETURN p",
+                        GraphQueryOptions.builder()
+                                .params(Collections.singletonMap("name", "Ada"))
+                                .timeoutMs(1000L)
+                                .build())
+                .get();
+GraphQueryResult names = graph.roQuery("MATCH (p:Person) RETURN p.name").get();
+```
+
+`query` and `roQuery` return `CompletableFuture<GraphQueryResult>` through the normal client
+request, backpressure, error, and completion machinery. `roQuery` uses `GRAPH.RO_QUERY`, so the
+server rejects writes. Use typed parameters rather than string interpolation: supported values
+are null, Boolean, signed 64-bit integral numbers (including in-range `BigInteger`), finite
+Float/Double, Unicode String, List, and recursively string-keyed Map. Unsupported objects
+(including Java dates and graph entities), invalid Unicode, integer overflow and cyclic
+containers are rejected with a parameter path. Parameters are snapshotted when options are built.
+
+`timeoutMs` is an optional server-side timeout in milliseconds, from zero through
+`Long.MAX_VALUE`; omitted and explicit zero remain distinct. It does not replace the client's
+request timeout. The client timeout does not cancel server-side execution.
+
+Results retain ordered columns (including duplicate names), ordered rows of `GraphValue`, and
+statistics with nullable known fields plus every raw server line. Graph maps and entity properties
+use `GraphMap` entries to preserve order and duplicate keys. Nodes, relationships, paths,
+geographical points, float32 vectors and date/datetime/time/duration values have dedicated models.
+Temporal wrappers preserve the server's signed 64-bit seconds encoding without implicit timezone
+conversion; `GraphDuration` preserves FalkorDB's calendar-offset encoding, not `java.time.Duration`.
+
+A graph retains its parent client and a Rust `GraphContext` containing the graph key, selected
+database and database-selection lifetime. Internal native identifiers are never part of the public
+API. The existing phantom-reference cleanup worker releases the native selection after the final
+Java owner is collected; in-flight operations hold their own clones of the same Rust `Arc` context.
+Closing the parent invalidates operations and releases its retained native selections. A bound
+completion callback retains the Java handle and parent while a query is pending. Any subsequent
+`SELECT` attempt invalidates existing graph handles, including switching away and back to the same
+database. Select a fresh handle after a successful database change. Isolated scopes and pooled lease
+wrappers do not expose graph selection. Unwrapped pooled clients also reject selection, including
+cached references after release.
+
+Graph response decoding and schema resolution live exclusively in the shared core; Java never
+parses compact graph replies or manages a schema cache. Cluster routing uses the graph key's slot,
+including any supplied hash tag.
+
 ## PubSub Configuration and Monitoring
 
 ### Dynamic PubSub with Reconciliation

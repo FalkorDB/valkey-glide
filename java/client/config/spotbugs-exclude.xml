@@ -8,6 +8,9 @@
         <Class name="~^connection_request\..*$"/>
     </Match>
     <Match>
+        <Class name="~^graph_request\..*$"/>
+    </Match>
+    <Match>
         <Class name="~^response\..*$"/>
     </Match>
     <!-- Jedis compatibility layer is vendored; retain upstream structure without SpotBugs noise. -->
