@@ -413,6 +413,82 @@ async fn successful_batch_reset_confirms_database_zero() {
 }
 
 #[tokio::test]
+async fn successful_batch_database_changes_survive_later_command_errors() {
+    for atomic in [false, true] {
+        for reset in [false, true] {
+            for raise_on_error in [false, true] {
+                let mut replies = HashMap::from([
+                    (
+                        "SELECT".into(),
+                        vec![if atomic { "+QUEUED\r\n" } else { "+OK\r\n" }.into()],
+                    ),
+                    (
+                        "RESET".into(),
+                        vec![if atomic { "+QUEUED\r\n" } else { "+RESET\r\n" }.into()],
+                    ),
+                    (
+                        "INCR".into(),
+                        vec![
+                            if atomic {
+                                "+QUEUED\r\n"
+                            } else {
+                                "-ERR test integer failure\r\n"
+                            }
+                            .into(),
+                        ],
+                    ),
+                ]);
+                if atomic {
+                    replies.insert("MULTI".into(), vec!["+OK\r\n".into()]);
+                    replies.insert(
+                        "EXEC".into(),
+                        vec![
+                            if reset {
+                                "*3\r\n+OK\r\n+RESET\r\n-ERR test integer failure\r\n"
+                            } else {
+                                "*2\r\n+OK\r\n-ERR test integer failure\r\n"
+                            }
+                            .into(),
+                        ],
+                    );
+                }
+                let mock = server(replies);
+                let mut client = client(&mock).await;
+                let mut pipeline = redis::pipe();
+                if atomic {
+                    pipeline.atomic();
+                }
+                pipeline.cmd("SELECT").arg(3);
+                if reset {
+                    pipeline.cmd("RESET");
+                }
+                pipeline.cmd("INCR").arg("not-an-integer");
+                let result = if atomic {
+                    client
+                        .send_transaction(&pipeline, None, None, raise_on_error)
+                        .await
+                } else {
+                    client
+                        .send_pipeline(&pipeline, None, raise_on_error, None, Default::default())
+                        .await
+                };
+                assert_eq!(
+                    result.is_err(),
+                    raise_on_error,
+                    "atomic={atomic}, reset={reset}: {result:?}"
+                );
+                let database = if reset { 0 } else { 3 };
+                assert_eq!(client.current_database(), database);
+                assert_eq!(client.graph_database_epoch() & 1, 0);
+                assert!(GraphContext::new(client.clone(), "graph".into(), database).is_ok());
+                drop(client);
+                mock.close().await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn state_changes_wait_for_the_whole_graph_operation() {
     for (command, pipeline) in [
         ("SELECT", false),

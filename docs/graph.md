@@ -39,8 +39,9 @@ metadata resolution. `SELECT`, `RESET` and raw transaction-state changes take an
 exclusive lease, so they cannot move an in-flight graph operation to another
 database or queue it inside `MULTI`; independent graph queries remain concurrent.
 A confirmed successful `RESET`, including in a batch, selects database zero for
-fresh graph handles. An ambiguous batch state change still requires a successful
-standalone `SELECT` before selecting a new handle.
+fresh graph handles. Confirmed batch state changes are recorded before reporting
+an unrelated per-command error. An ambiguous batch state change still requires a
+successful standalone `SELECT` before selecting a new handle.
 Graph handles cannot retain pooled-client leases or isolated
 scopes; no graph-specific pooling API is introduced.
 

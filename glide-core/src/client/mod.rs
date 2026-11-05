@@ -2069,13 +2069,7 @@ impl Client {
         }
     }
 
-    fn get_transaction_values(
-        pipeline: &redis::Pipeline,
-        mut values: Vec<Value>,
-        command_count: usize,
-        offset: usize,
-        raise_on_error: bool,
-    ) -> RedisResult<Value> {
+    fn get_transaction_values(mut values: Vec<Value>, offset: usize) -> RedisResult<Value> {
         assert_eq!(values.len(), 1);
         let value = values.pop();
         let values = match value {
@@ -2103,12 +2097,7 @@ impl Client {
                     .into());
             }
         };
-        Self::convert_pipeline_values_to_expected_types(
-            pipeline,
-            values,
-            command_count,
-            raise_on_error,
-        )
+        Ok(Value::Array(values))
     }
 
     fn convert_pipeline_values_to_expected_types(
@@ -2140,6 +2129,25 @@ impl Client {
                 },
             )?;
         Ok(Value::Array(values))
+    }
+
+    async fn reconcile_and_convert_batch(
+        &mut self,
+        pipeline: &redis::Pipeline,
+        result: RedisResult<Value>,
+        command_count: usize,
+        raise_on_error: bool,
+    ) -> RedisResult<Value> {
+        self.reconcile_batch_database(pipeline, &result).await?;
+        match result? {
+            Value::Array(values) => Self::convert_pipeline_values_to_expected_types(
+                pipeline,
+                values,
+                command_count,
+                raise_on_error,
+            ),
+            value => Ok(value),
+        }
     }
 
     /// Send a pipeline to the server.
@@ -2186,19 +2194,13 @@ impl Client {
             // which is an array containing the results of all the commands in the pipeline.
             let offset = command_count + 1;
 
-            let result = run_with_timeout(
+            run_with_timeout(
                 Some(to_duration(transaction_timeout, self.request_timeout)),
                 async move {
-                    match client {
+                    let result = match client {
                         ClientWrapper::Standalone(mut client) => {
                             let values = client.send_pipeline(pipeline, offset, 1).await?;
-                            Client::get_transaction_values(
-                                pipeline,
-                                values,
-                                command_count,
-                                offset,
-                                raise_on_error,
-                            )
+                            Client::get_transaction_values(values, offset)
                         }
                         ClientWrapper::Cluster { mut client, .. } => {
                             let values = match routing {
@@ -2213,25 +2215,22 @@ impl Client {
                                         .await?
                                 }
                             };
-                            Client::get_transaction_values(
-                                pipeline,
-                                values,
-                                command_count,
-                                offset,
-                                raise_on_error,
-                            )
+                            Client::get_transaction_values(values, offset)
                         }
                         ClientWrapper::Lazy(_) => {
                             unreachable!("Lazy client should have been initialized")
                         }
-                    }
+                    };
+                    self.reconcile_and_convert_batch(
+                        pipeline,
+                        result,
+                        command_count,
+                        raise_on_error,
+                    )
+                    .await
                 },
             )
-            .await;
-            // Record the drift only if the SELECT reply applied (see
-            // `batch_reply_applied`).
-            self.reconcile_batch_database(pipeline, &result).await?;
-            result
+            .await
         })
     }
 
@@ -2293,7 +2292,7 @@ impl Client {
                 )));
             }
 
-            let result = run_with_timeout(
+            run_with_timeout(
                 Some(to_duration(pipeline_timeout, self.request_timeout)),
                 async move {
                     let values = match client {
@@ -2330,19 +2329,16 @@ impl Client {
                         }
                     }?;
 
-                    Client::convert_pipeline_values_to_expected_types(
+                    self.reconcile_and_convert_batch(
                         pipeline,
-                        values,
+                        Ok(Value::Array(values)),
                         command_count,
                         raise_on_error,
                     )
+                    .await
                 },
             )
-            .await;
-            // Record the drift only if the SELECT reply applied (see
-            // `batch_reply_applied`).
-            self.reconcile_batch_database(pipeline, &result).await?;
-            result
+            .await
         })
     }
 
