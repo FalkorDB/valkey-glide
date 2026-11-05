@@ -126,6 +126,14 @@ pub fn serialize_query(query: &str, options: &GraphQueryOptions) -> RedisResult<
     if query.contains('\0') {
         return Err(invalid("Query text must not contain NUL"));
     }
+    if options
+        .timeout_ms
+        .is_some_and(|timeout| timeout > i64::MAX as u64)
+    {
+        return Err(invalid(
+            "Server timeout must fit a nonnegative signed 64-bit integer",
+        ));
+    }
     if options.parameters.is_empty() {
         return Ok(query.to_owned());
     }
@@ -173,6 +181,20 @@ mod tests {
             query(value).unwrap(),
             "CYPHER `p`=[null,true,-9223372036854775808,9223372036854775807,-0.0,{`with space:界`:1.0}] RETURN $p"
         );
+    }
+
+    #[test]
+    fn validates_the_server_timeout_integer_range_without_changing_zero() {
+        for timeout in [0, i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX] {
+            let result = serialize_query(
+                "RETURN 1",
+                &GraphQueryOptions {
+                    timeout_ms: Some(timeout),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(result.is_ok(), timeout <= i64::MAX as u64);
+        }
     }
 
     #[test]
@@ -243,7 +265,7 @@ mod tests {
             serialize_query(
                 "RETURN 1",
                 &GraphQueryOptions {
-                    timeout_ms: Some(u64::MAX),
+                    timeout_ms: Some(i64::MAX as u64),
                     ..Default::default()
                 }
             )

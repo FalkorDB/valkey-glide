@@ -49,6 +49,12 @@ fn node() -> Value {
 }
 
 async fn delayed_client() -> (Client, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    delayed_client_with_timeout(250).await
+}
+
+async fn delayed_client_with_timeout(
+    request_timeout: u32,
+) -> (Client, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
@@ -84,6 +90,7 @@ async fn delayed_client() -> (Client, Arc<AtomicUsize>, tokio::task::JoinHandle<
                                     b"CLIENT" => response(Value::Okay),
                                     b"PING" => response(Value::SimpleString("PONG".into())),
                                     b"INFO" => response(text("role:master\r\n")),
+                                    b"SELECT" | b"MULTI" | b"DISCARD" => response(Value::Okay),
                                     b"GRAPH.QUERY" | b"GRAPH.RO_QUERY" => {
                                         observed.fetch_add(1, Ordering::AcqRel);
                                         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -117,7 +124,7 @@ async fn delayed_client() -> (Client, Arc<AtomicUsize>, tokio::task::JoinHandle<
                 port: address.port(),
                 unix_socket_path: None,
             }],
-            request_timeout: Some(250),
+            request_timeout: Some(request_timeout),
             inflight_requests_limit: Some(1),
             ..Default::default()
         },
@@ -287,7 +294,7 @@ async fn select_invalidates_existing_handles_even_when_database_is_unchanged() {
 async fn unsettled_select_and_pooled_clients_cannot_create_graph_handles() {
     let mock = server(HashMap::from([(
         "SELECT".into(),
-        vec!["-ERR invalid database\r\n".into()],
+        vec!["-ERR invalid database\r\n".into(), "+OK\r\n".into()],
     )]));
     let mut client = client(&mock).await;
     assert!(
@@ -297,8 +304,16 @@ async fn unsettled_select_and_pooled_clients_cannot_create_graph_handles() {
             .is_err()
     );
     assert!(GraphContext::new(client.clone(), "graph".into(), 0).is_err());
+    client
+        .send_command(redis::cmd("SELECT").arg(0), None)
+        .await
+        .unwrap();
+    assert!(GraphContext::new(client.clone(), "graph".into(), 0).is_ok());
     client.mark_pool_managed();
-    assert!(GraphContext::new(client.clone(), "graph".into(), 0).is_err());
+    let error = GraphContext::new(client.clone(), "graph".into(), 0)
+        .err()
+        .expect("pool-managed graph selection must fail");
+    assert!(error.to_string().contains("pooled client lease"), "{error}");
     drop(client);
     mock.close().await;
 }
@@ -366,6 +381,7 @@ async fn queued_select_does_not_confirm_a_database_change() {
         .send_command(&mut redis::cmd("DISCARD"), None)
         .await
         .unwrap();
+    assert_eq!(client.current_database(), 0);
     assert!(GraphContext::new(client.clone(), "graph".into(), 0).is_err());
     client
         .send_command(redis::cmd("SELECT").arg(0), None)
@@ -377,7 +393,7 @@ async fn queued_select_does_not_confirm_a_database_change() {
 }
 
 #[tokio::test]
-async fn batch_reset_requires_a_confirmed_select_before_new_handles() {
+async fn successful_batch_reset_confirms_database_zero() {
     let mock = server(HashMap::from([
         ("SELECT".into(), vec!["+OK\r\n".into()]),
         ("RESET".into(), vec!["+RESET\r\n".into()]),
@@ -389,14 +405,58 @@ async fn batch_reset_requires_a_confirmed_select_before_new_handles() {
         .send_pipeline(&pipeline, None, true, None, Default::default())
         .await
         .unwrap();
-    assert!(GraphContext::new(client.clone(), "graph".into(), 3).is_err());
-    client
-        .send_command(redis::cmd("SELECT").arg(0), None)
-        .await
-        .unwrap();
+    assert_eq!(client.current_database(), 0);
+    assert_eq!(client.graph_database_epoch() & 1, 0);
     assert!(GraphContext::new(client.clone(), "graph".into(), 0).is_ok());
     drop(client);
     mock.close().await;
+}
+
+#[tokio::test]
+async fn state_changes_wait_for_the_whole_graph_operation() {
+    for (command, pipeline) in [
+        ("SELECT", false),
+        ("MULTI", false),
+        ("SELECT", true),
+        ("MULTI", true),
+    ] {
+        let (client, observed, server) = delayed_client_with_timeout(2000).await;
+        let graph = GraphContext::new(client.clone(), "graph".into(), 0).unwrap();
+        let operation =
+            tokio::spawn(
+                async move { graph.query("RETURN n", &GraphQueryOptions::default()).await },
+            );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while observed.load(Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut changing_client = client.clone();
+        let change = tokio::spawn(async move {
+            let mut cmd = redis::cmd(command);
+            if command == "SELECT" {
+                cmd.arg(0);
+            }
+            if pipeline {
+                let mut batch = redis::pipe();
+                batch.add_command(cmd);
+                changing_client
+                    .send_pipeline(&batch, None, true, None, Default::default())
+                    .await
+            } else {
+                changing_client.send_command(&mut cmd, None).await
+            }
+        });
+        let result = operation.await.unwrap().unwrap();
+        assert!(matches!(&result.rows[0][0], GraphValue::Node(node) if node.labels == ["Label"]));
+        change.await.unwrap().unwrap();
+        assert_eq!(observed.load(Ordering::Acquire), 2);
+        drop(client);
+        server.abort();
+        let _ = server.await;
+    }
 }
 
 #[tokio::test]

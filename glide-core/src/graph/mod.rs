@@ -46,7 +46,7 @@ impl GraphContext {
                 "Graph handles cannot retain a pooled client lease",
             )));
         }
-        let database_epoch = client.graph_database_epoch();
+        let database_epoch = client.graph_selection_epoch()?;
         if database_epoch & 1 != 0 {
             return Err(database_changed());
         }
@@ -114,6 +114,10 @@ impl GraphContext {
         options: &GraphQueryOptions,
         readonly: bool,
     ) -> RedisResult<GraphQueryResult> {
+        let _state = self.inner.client.graph_operation_guard().await;
+        if !self.database_matches() {
+            return Err(database_changed());
+        }
         let mut client = self.inner.client.clone();
         let mut command = self.command(query, readonly, options.timeout_ms);
         let mut connection = client.graph_connection(&command, None).await?;
@@ -248,6 +252,54 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.is_timeout(), "{error}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_graph_operations_share_the_state_lease() {
+        let graph = lazy_graph().await;
+        let _first = graph.inner.client.graph_operation_guard().await;
+        let _second = tokio::time::timeout(
+            Duration::from_secs(1),
+            graph.inner.client.graph_operation_guard(),
+        )
+        .await
+        .expect("independent graph operations must not serialize");
+        assert!(GraphContext::new(graph.inner.client.clone(), "other".into(), 0).is_ok());
+    }
+
+    #[tokio::test]
+    async fn state_admission_wait_uses_the_graph_deadline_and_is_cancel_safe() {
+        let graph = lazy_graph().await;
+        let first = graph.inner.client.graph_operation_guard().await;
+        let mut changing_client = graph.inner.client.clone();
+        let change = tokio::spawn(async move {
+            changing_client
+                .send_command(redis::cmd("SELECT").arg(0), None)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while graph.inner.client.graph_selection_epoch().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(GraphContext::new(graph.inner.client.clone(), "other".into(), 0).is_err());
+        let error = graph
+            .execute_with_deadline(
+                "RETURN 42",
+                &GraphQueryOptions::default(),
+                false,
+                tokio::time::Instant::now() + Duration::from_millis(20),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.is_timeout(), "{error}");
+        change.abort();
+        assert!(change.await.unwrap_err().is_cancelled());
+        assert_eq!(graph.inner.client.graph_database_epoch(), 0);
+        drop(first);
+        assert!(GraphContext::new(graph.inner.client.clone(), "other".into(), 0).is_ok());
     }
 
     #[tokio::test]

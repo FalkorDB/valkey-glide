@@ -45,8 +45,15 @@ pub async fn execute_request_with_context(graph: GraphContext, bytes: &[u8]) -> 
 }
 
 fn parse_request(bytes: &[u8]) -> RedisResult<QueryRequest> {
-    QueryRequest::parse_from_bytes(bytes)
-        .map_err(|error| invalid(format!("Invalid graph request: {error}")))
+    let mut input = protobuf::CodedInputStream::from_bytes(bytes);
+    // Each map level has Parameter, ParameterMap, and ParameterEntry messages.
+    input.set_recursion_limit(3 * 128 + 8);
+    let request = QueryRequest::parse_from(&mut input)
+        .map_err(|error| invalid(format!("Invalid graph request: {error}")))?;
+    input
+        .check_eof()
+        .map_err(|error| invalid(format!("Invalid graph request: {error}")))?;
+    Ok(request)
 }
 
 async fn execute(
@@ -76,7 +83,7 @@ fn convert_map(
                 .as_ref()
                 .ok_or_else(|| invalid("Missing graph parameter value".into()))?;
             if result
-                .insert(entry.key.to_string(), convert_parameter(value, depth + 1)?)
+                .insert(entry.key.to_string(), convert_parameter(value, depth)?)
                 .is_some()
             {
                 return Err(invalid(format!(
@@ -115,4 +122,69 @@ fn convert_parameter(parameter: &Parameter, depth: usize) -> RedisResult<GraphPa
 
 fn invalid(message: String) -> RedisError {
     RedisError::from((ErrorKind::ClientError, "Invalid graph input", message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph_request::{ParameterEntry, ParameterList};
+    use protobuf::MessageField;
+
+    #[test]
+    fn bridge_and_serializer_agree_at_the_parameter_depth_boundary() {
+        for map in [false, true] {
+            for depth in [127, 128, 129] {
+                let mut value = Parameter {
+                    value: Some(parameter::Value::IntegerValue(42)),
+                    ..Default::default()
+                };
+                for _ in 0..depth {
+                    value = Parameter {
+                        value: Some(if map {
+                            parameter::Value::MapValue(ParameterMap {
+                                entries: vec![ParameterEntry {
+                                    key: "key".into(),
+                                    value: MessageField::some(value),
+                                    ..Default::default()
+                                }],
+                                ..Default::default()
+                            })
+                        } else {
+                            parameter::Value::ListValue(ParameterList {
+                                values: vec![value],
+                                ..Default::default()
+                            })
+                        }),
+                        ..Default::default()
+                    };
+                }
+                let request = QueryRequest {
+                    parameters: MessageField::some(ParameterMap {
+                        entries: vec![ParameterEntry {
+                            key: "p".into(),
+                            value: MessageField::some(value),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let parsed = parse_request(&request.write_to_bytes().unwrap()).unwrap();
+                let converted = convert_map(parsed.parameters.as_ref(), 0);
+                assert_eq!(converted.is_ok(), depth <= 128, "map={map}, depth={depth}");
+                if let Ok(parameters) = converted {
+                    assert!(
+                        super::super::params::serialize_query(
+                            "RETURN $p",
+                            &GraphQueryOptions {
+                                parameters,
+                                ..Default::default()
+                            }
+                        )
+                        .is_ok()
+                    );
+                }
+            }
+        }
+    }
 }

@@ -511,6 +511,9 @@ pub struct ClientShared {
     // Used by scope connections to inherit the parent's current database.
     current_database: Arc<AtomicU32>,
     graph_database_epoch: AtomicU64,
+    // Graph queries share a lease through metadata resolution; database and
+    // raw transaction state changes take the exclusive lease.
+    graph_state_lock: RwLock<()>,
     // Set before dispatching any SELECT-bearing command (single or batch); cleared
     // only by a successful release reset. `current_database` can under-report the
     // live db — a SELECT can apply on the connection even when the call errors or
@@ -1201,6 +1204,7 @@ impl Client {
             .graph_database_epoch
             .fetch_and(!1, Ordering::AcqRel);
         self.update_stored_client_name(None).await?;
+        self.shared.multi_active.store(false, Ordering::Release);
         self.update_stored_protocol(redis::ProtocolVersion::RESP2)
             .await?;
         Arc::make_mut(&mut self.otel_metadata).db_namespace = "0".to_string();
@@ -1437,6 +1441,12 @@ impl Client {
         Box::pin(async move {
             // `BLOB.*` transfers lend a buffer, so only the rdma methods send them.
             crate::rdma::refuse_direct_command(cmd)?;
+            let shared = self.shared.clone();
+            let _graph_state = if Self::changes_graph_connection_state(cmd) {
+                Some(shared.graph_state_lock.write().await)
+            } else {
+                None
+            };
             // Refresh IAM auth before the command (see `reconcile_iam_before_dispatch`).
             self.reconcile_iam_before_dispatch().await?;
             // Track MULTI/EXEC/DISCARD for the borrow-time re-AUTH defer.
@@ -2144,6 +2154,15 @@ impl Client {
     ) -> redis::RedisFuture<'a, Value> {
         Box::pin(async move {
             crate::rdma::refuse_direct_in_batch(pipeline)?;
+            let shared = self.shared.clone();
+            let _graph_state = if pipeline
+                .cmd_iter()
+                .any(|cmd| Self::changes_graph_connection_state(cmd))
+            {
+                Some(shared.graph_state_lock.write().await)
+            } else {
+                None
+            };
             self.reconcile_iam_before_dispatch().await?;
             // Capture the batch's last SELECT now; apply it after dispatch if the
             // reply shows the server took it, and flag a possible db change (see
@@ -2211,11 +2230,7 @@ impl Client {
             .await;
             // Record the drift only if the SELECT reply applied (see
             // `batch_reply_applied`).
-            if let Some((idx, db)) = drifted_db
-                && Self::batch_reply_applied(&result, idx)
-            {
-                self.apply_batch_select_db(db, !has_reset).await;
-            }
+            self.reconcile_batch_database(pipeline, &result).await?;
             result
         })
     }
@@ -2243,6 +2258,15 @@ impl Client {
     ) -> redis::RedisFuture<'a, Value> {
         Box::pin(async move {
             crate::rdma::refuse_direct_in_batch(pipeline)?;
+            let shared = self.shared.clone();
+            let _graph_state = if pipeline
+                .cmd_iter()
+                .any(|cmd| Self::changes_graph_connection_state(cmd))
+            {
+                Some(shared.graph_state_lock.write().await)
+            } else {
+                None
+            };
             self.reconcile_iam_before_dispatch().await?;
             // A raw MULTI stays open after a non-atomic pipeline returns, so track
             // it pre-dispatch for `prepare_for_borrow`'s defer. The SELECT drift is
@@ -2317,11 +2341,7 @@ impl Client {
             .await;
             // Record the drift only if the SELECT reply applied (see
             // `batch_reply_applied`).
-            if let Some((idx, db)) = drifted_db
-                && Self::batch_reply_applied(&result, idx)
-            {
-                self.apply_batch_select_db(db, !has_reset).await;
-            }
+            self.reconcile_batch_database(pipeline, &result).await?;
             result
         })
     }
@@ -3414,6 +3434,7 @@ impl Client {
                     }),
                     current_database: Arc::new(AtomicU32::new(request.database_id as u32)),
                     graph_database_epoch: AtomicU64::new(0),
+                    graph_state_lock: RwLock::new(()),
                     db_maybe_dirty: Arc::new(AtomicBool::new(false)),
                     last_iam_generation: Arc::new(AtomicU64::new(0)),
                     is_pool_managed: Arc::new(AtomicBool::new(false)),
@@ -3743,12 +3764,7 @@ impl Client {
     /// [`batch_reply_applied`](Self::batch_reply_applied) to record the drift only
     /// if the server applied it. A pure read; never mutates db state.
     ///
-    /// Only `SELECT` is tracked, not `RESET` (which also returns the connection to
-    /// db 0). A batch like `[SELECT 3, RESET]` therefore records db 3 while the live
-    /// connection is on db 0, leaving non-pooled scope/reconnect metadata stale.
-    /// Pooled release is unaffected — `db_maybe_dirty` forces the reset `SELECT`
-    /// regardless — and a `RESET` inside a pooled borrow is an unusual pattern, so
-    /// the narrow non-pooled gap is left as a known limitation rather than tracked.
+    /// RESET is reconciled separately, in reply order, after dispatch.
     fn last_select_db(&self, pipeline: &redis::Pipeline) -> Option<(usize, u32)> {
         pipeline
             .cmd_iter()
@@ -3762,23 +3778,60 @@ impl Client {
             .last()
     }
 
-    /// Record a batch `SELECT`'s db, mirroring the single-command
-    /// `handle_select_command` so all three db trackers stay in step: the reconnect
-    /// db (`update_stored_database_id`), the OTel `db_namespace`, and
-    /// `current_database` (read by scope connections).
-    async fn apply_batch_select_db(&mut self, db: u32, graph_database_settled: bool) {
-        if let Err(e) = self.update_stored_database_id(db as i64).await {
+    async fn reconcile_batch_database(
+        &mut self,
+        pipeline: &redis::Pipeline,
+        result: &RedisResult<Value>,
+    ) -> RedisResult<()> {
+        let Ok(Value::Array(values)) = result else {
+            return Ok(());
+        };
+        if !pipeline.cmd_iter().any(|cmd| self.is_reset_command(cmd)) {
+            if let Some((index, database)) = self.last_select_db(pipeline)
+                && Self::batch_reply_applied(result, index)
+            {
+                self.apply_batch_select_db(database).await;
+            }
+            return Ok(());
+        }
+        let mut last_change_confirmed = true;
+        for (index, command) in pipeline.cmd_iter().enumerate() {
+            if self.is_select_command(command) {
+                last_change_confirmed = Self::batch_reply_applied(result, index);
+                if last_change_confirmed {
+                    self.handle_select_command(command).await?;
+                }
+            } else if self.is_reset_command(command) {
+                last_change_confirmed = matches!(
+                    values.get(index),
+                    Some(Value::SimpleString(reply)) if reply == "RESET"
+                );
+                if last_change_confirmed {
+                    self.handle_reset_command().await?;
+                }
+            }
+        }
+        if !last_change_confirmed {
+            self.mark_graph_database_dirty();
+        }
+        Ok(())
+    }
+
+    async fn apply_batch_select_db(&mut self, database: u32) {
+        if let Err(error) = self.update_stored_database_id(database as i64).await {
             log_warn(
                 "apply_batch_select_db",
-                format!("failed to update reconnect database to {db}: {e}"),
+                format!("failed to update reconnect database to {database}: {error}"),
             );
-        } else if graph_database_settled {
+        } else {
             self.shared
                 .graph_database_epoch
                 .fetch_and(!1, Ordering::AcqRel);
         }
-        Arc::make_mut(&mut self.otel_metadata).db_namespace = db.to_string();
-        self.shared.current_database.store(db, Ordering::Release);
+        Arc::make_mut(&mut self.otel_metadata).db_namespace = database.to_string();
+        self.shared
+            .current_database
+            .store(database, Ordering::Release);
     }
 
     /// Whether the `SELECT` at `idx` in the batch actually executed. An executed
@@ -3989,6 +4042,7 @@ impl Client {
                 circuit_breaker: None,
                 current_database: Arc::new(AtomicU32::new(0)),
                 graph_database_epoch: AtomicU64::new(0),
+                graph_state_lock: RwLock::new(()),
                 db_maybe_dirty: Arc::new(AtomicBool::new(false)),
                 last_iam_generation: Arc::new(AtomicU64::new(0)),
                 is_pool_managed: Arc::new(AtomicBool::new(false)),
@@ -4071,6 +4125,7 @@ pub fn create_test_glide_client() -> Client {
             circuit_breaker: None,
             current_database: Arc::new(AtomicU32::new(0)),
             graph_database_epoch: AtomicU64::new(0),
+            graph_state_lock: RwLock::new(()),
             db_maybe_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_iam_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             is_pool_managed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -5029,6 +5084,7 @@ mod tests {
                 circuit_breaker: None,
                 current_database: Arc::new(AtomicU32::new(0)),
                 graph_database_epoch: AtomicU64::new(0),
+                graph_state_lock: RwLock::new(()),
                 db_maybe_dirty: Arc::new(AtomicBool::new(false)),
                 last_iam_generation: Arc::new(AtomicU64::new(0)),
                 is_pool_managed: Arc::new(AtomicBool::new(false)),

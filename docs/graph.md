@@ -34,9 +34,13 @@ than a separate close operation.
 Database selection is captured with a generation counter. A `SELECT` attempt
 invalidates existing graph handles even if it selects the same database. If a
 `SELECT` fails or times out, explicitly select a known database successfully
-before selecting another graph. Do not execute `SELECT` or `RESET` concurrently
-with graph queries. After a raw batch containing `RESET`, confirm the database
-with a successful standalone `SELECT` before selecting a fresh graph handle.
+before selecting another graph. Graph operations hold a shared connection-state lease through query and
+metadata resolution. `SELECT`, `RESET` and raw transaction-state changes take an
+exclusive lease, so they cannot move an in-flight graph operation to another
+database or queue it inside `MULTI`; independent graph queries remain concurrent.
+A confirmed successful `RESET`, including in a batch, selects database zero for
+fresh graph handles. An ambiguous batch state change still requires a successful
+standalone `SELECT` before selecting a new handle.
 Graph handles cannot retain pooled-client leases or isolated
 scopes; no graph-specific pooling API is introduced.
 
@@ -71,6 +75,7 @@ results from ordinary GLIDE commands.
 
 The optional graph server timeout is a nonnegative millisecond count within the
 server's signed 64-bit range. Zero keeps its server-defined meaning. It is
+also subject to the server's separately configured `TIMEOUT_MAX` limit. It is
 separate from the configured GLIDE client request timeout. One client deadline
 covers native serialization, query execution, metadata reads, permitted redirects,
 compact decoding and canonical result encoding. Metadata does not get a fresh
@@ -80,7 +85,7 @@ success.
 
 ## Results
 
-`GraphQueryResult` contains ordered columns, ordered rows and statistics. Rows are
+Graph query results contain ordered columns, ordered rows and statistics. Rows are
 not dictionaries indexed by column name: duplicate column names in a valid
 payload are preserved. The pinned server itself rejects some queries that
 produce duplicate aliases.

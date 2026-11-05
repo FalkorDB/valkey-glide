@@ -27,13 +27,41 @@ impl Client {
         self.shared.graph_database_epoch.load(Ordering::Acquire)
     }
 
+    pub(crate) fn graph_selection_epoch(&self) -> RedisResult<u64> {
+        let _state = self.shared.graph_state_lock.try_read().map_err(|_| {
+            RedisError::from((
+                ErrorKind::ClientError,
+                "Cannot select a graph while connection state is changing",
+            ))
+        })?;
+        Ok(self.graph_database_epoch())
+    }
+
+    pub(crate) async fn graph_operation_guard(&self) -> tokio::sync::RwLockReadGuard<'_, ()> {
+        self.shared.graph_state_lock.read().await
+    }
+
+    pub(super) fn changes_graph_connection_state(command: &Cmd) -> bool {
+        command.arg_idx(0).is_some_and(|name| {
+            [
+                b"SELECT".as_slice(),
+                b"RESET".as_slice(),
+                b"MULTI".as_slice(),
+                b"EXEC".as_slice(),
+                b"DISCARD".as_slice(),
+            ]
+            .iter()
+            .any(|state_command| name.eq_ignore_ascii_case(state_command))
+        })
+    }
+
     pub(super) fn mark_graph_database_dirty(&self) {
         self.shared
             .graph_database_epoch
-            .fetch_add(2, Ordering::AcqRel);
+            .fetch_or(1, Ordering::AcqRel);
         self.shared
             .graph_database_epoch
-            .fetch_or(1, Ordering::AcqRel);
+            .fetch_add(2, Ordering::AcqRel);
     }
 
     /// Select an existing connection for one graph query and its metadata reads.

@@ -125,7 +125,7 @@ Before starting this step, make sure you've installed all software requirments.
         # Run only server module tests (requires valkey modules)
         npm run test:modules
 
-        # Local typed graph transport/model tests (requires build-protobuf only)
+        # Local typed graph transport/model tests (build first for native declarations and protobuf)
         npm run test:graph-unit
 
         # Graph callback and lifetime regression tests (requires the native build)

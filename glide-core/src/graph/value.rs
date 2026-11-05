@@ -28,7 +28,8 @@ pub enum GraphParameter {
 pub struct GraphQueryOptions {
     /// Literal parameters, serialized without modifying the query body.
     pub parameters: BTreeMap<String, GraphParameter>,
-    /// Optional server-side timeout in milliseconds.
+    /// Optional server-side timeout in milliseconds, at most `i64::MAX`.
+    /// The server's configured TIMEOUT_MAX may impose a lower limit.
     pub timeout_ms: Option<u64>,
 }
 

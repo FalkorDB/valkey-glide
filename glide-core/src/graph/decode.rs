@@ -252,9 +252,9 @@ fn inspect(
                     "Map payload must contain alternating keys and values",
                 ));
             }
-            for entry in entries.chunks_exact(2) {
-                text(&entry[0])?;
-                let (tag, value) = tagged(&entry[1])?;
+            for [key, value] in entries.as_chunks::<2>().0 {
+                text(key)?;
+                let (tag, value) = tagged(value)?;
                 inspect(tag, value, requirements, depth + 1)?;
             }
         }
@@ -407,11 +407,13 @@ fn decode_value(
         9 => GraphValue::Path(path(value, schema, depth)?),
         10 => GraphValue::Map(
             array(value)?
-                .chunks_exact(2)
-                .map(|entry| {
-                    let (tag, value) = tagged(&entry[1])?;
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|[key, value]| {
+                    let (tag, value) = tagged(value)?;
                     Ok((
-                        text(&entry[0])?.to_owned(),
+                        text(key)?.to_owned(),
                         decode_value(tag, value, schema, depth + 1)?,
                     ))
                 })
