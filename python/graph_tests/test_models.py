@@ -216,11 +216,15 @@ def test_entities_paths_points_vectors_temporal_are_materialized():
             b"properties": [],
         },
     )
+    destination = cell("node", {b"id": 4, b"labels": [], b"properties": []})
     row = result(
         [
             node,
             relationship,
-            cell("path", {b"nodes": [node], b"relationships": [relationship]}),
+            cell(
+                "path",
+                {b"nodes": [node, destination], b"relationships": [relationship]},
+            ),
             cell("point", {b"latitude": 1.25, b"longitude": -2.5}),
             cell("vector", [1.0, 2.5]),
             *[
@@ -231,7 +235,7 @@ def test_entities_paths_points_vectors_temporal_are_materialized():
     ).rows[0]
     assert row[0] == GraphNode(2**63 - 1, ["Person"], GraphMap([("age", 42)]))
     assert row[1] == GraphRelationship(8, "KNOWS", 2**63 - 1, 4, GraphMap([]))
-    assert row[2] == GraphPath([row[0]], [row[1]])
+    assert row[2] == GraphPath([row[0], GraphNode(4, [], GraphMap([]))], [row[1]])
     assert row[3] == GraphPoint(1.25, -2.5)
     assert row[4] == GraphVector([1.0, 2.5])
     assert row[5:] == [
@@ -267,3 +271,101 @@ def test_raw_or_malformed_envelopes_fail_closed(bad):
 def test_malformed_canonical_values_fail_closed(bad):
     with pytest.raises(RequestError, match="canonical graph"):
         result([bad])
+
+
+INTEGER_STATISTICS = (
+    "labels_added",
+    "labels_removed",
+    "nodes_created",
+    "nodes_deleted",
+    "properties_set",
+    "properties_removed",
+    "relationships_created",
+    "relationships_deleted",
+    "indices_created",
+    "indices_deleted",
+    "graph_version",
+)
+
+
+@pytest.mark.parametrize("key", INTEGER_STATISTICS)
+@pytest.mark.parametrize("value", [0, 1, 2**63 - 1, 2**63, 2**64 - 1])
+@pytest.mark.parametrize("as_bytes", [False, True])
+def test_unsigned_statistics_preserve_exact_u64_bounds(key, value, as_bytes):
+    encoded = str(value).encode("ascii") if as_bytes else value
+    decoded = result([], statistics={b"raw": [], key.encode(): encoded})
+    assert getattr(decoded.statistics, key) == value
+
+
+@pytest.mark.parametrize("key", INTEGER_STATISTICS)
+@pytest.mark.parametrize(
+    "bad",
+    [
+        -1,
+        2**64,
+        True,
+        1.0,
+        "1",
+        b"",
+        b"-1",
+        b"+1",
+        b" 1",
+        b"1\n",
+        b"1_0",
+        b"1.0",
+        b"\xff",
+        b"18446744073709551616",
+    ],
+)
+def test_invalid_unsigned_statistics_fail_closed(key, bad):
+    with pytest.raises(RequestError, match="canonical graph"):
+        result([], statistics={b"raw": [], key.encode(): bad})
+
+
+@pytest.mark.parametrize(
+    "node_ids,endpoints",
+    [
+        ([], []),
+        ([1], [(1, 2)]),
+        ([1, 2], []),
+        ([1, 2], [(1, 3)]),
+        ([1, 2, 3], [(1, 2), (1, 3)]),
+    ],
+)
+def test_malformed_path_shapes_and_endpoints_fail_closed(node_ids, endpoints):
+    with pytest.raises(RequestError, match="canonical graph"):
+        result([path_cell(node_ids, endpoints)])
+
+
+def path_cell(node_ids, endpoints):
+    return cell(
+        "path",
+        {
+            b"nodes": [
+                cell("node", {b"id": identity, b"labels": [], b"properties": []})
+                for identity in node_ids
+            ],
+            b"relationships": [
+                cell(
+                    "relationship",
+                    {
+                        b"id": index,
+                        b"type": b"EDGE",
+                        b"source_id": source,
+                        b"destination_id": destination,
+                        b"properties": [],
+                    },
+                )
+                for index, (source, destination) in enumerate(endpoints)
+            ],
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "node_ids,endpoints",
+    [([1], []), ([1, 2], [(2, 1)]), ([1, 1], [(1, 1)])],
+)
+def test_zero_length_reversed_and_self_loop_paths_are_valid(node_ids, endpoints):
+    path = result([path_cell(node_ids, endpoints)]).rows[0][0]
+    assert [node.id for node in path.nodes] == node_ids

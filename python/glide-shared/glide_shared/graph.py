@@ -5,12 +5,13 @@
 from __future__ import annotations
 
 import math
+import os
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Union, cast
 
-from .exceptions import RequestError
+from .exceptions import ClosingError, RequestError
 from .protobuf.graph_request_pb2 import Parameter, ParameterMap, QueryRequest
 
 GraphParameter = Union[
@@ -22,14 +23,35 @@ class _NativeGraphContext:
     """One owned Rust context, shared by copies of a language graph handle."""
 
     def __init__(self, pointer: object, release: Callable[[object], object]) -> None:
-        self.pointer = pointer
-        self._finalizer = weakref.finalize(self, release, pointer)
+        self._pointer = pointer
+        self._process_id = os.getpid()
+        self._finalizer = weakref.finalize(
+            self, _release_native_context, pointer, release, self._process_id
+        )
+
+    @property
+    def pointer(self) -> object:
+        if self._process_id != os.getpid():
+            raise ClosingError(
+                "Cannot use a graph handle created before fork(). "
+                "Select a new graph in the child process."
+            )
+        return self._pointer
 
     def __copy__(self) -> _NativeGraphContext:
         return self
 
     def __deepcopy__(self, memo: dict[int, object]) -> _NativeGraphContext:
         return self
+
+
+def _release_native_context(
+    pointer: object, release: Callable[[object], object], process_id: int
+) -> None:
+    # The inherited Rust client's threads and locks did not survive fork.
+    # Neither a query nor its destructor may enter that runtime in the child.
+    if process_id == os.getpid():
+        release(pointer)
 
 
 @dataclass(frozen=True)
@@ -331,10 +353,18 @@ def _decode_path(fields: dict[str, object]) -> GraphPath:
         not isinstance(edge, GraphRelationship) for edge in relationships
     ):
         raise ValueError("invalid canonical graph path")
-    return GraphPath(
-        cast(list[GraphNode], nodes),
-        cast(list[GraphRelationship], relationships),
-    )
+    typed_nodes = cast(list[GraphNode], nodes)
+    typed_relationships = cast(list[GraphRelationship], relationships)
+    if len(typed_nodes) != len(typed_relationships) + 1:
+        raise ValueError("invalid canonical graph path length")
+    for index, edge in enumerate(typed_relationships):
+        adjacent = (typed_nodes[index].id, typed_nodes[index + 1].id)
+        if adjacent not in (
+            (edge.source_id, edge.destination_id),
+            (edge.destination_id, edge.source_id),
+        ):
+            raise ValueError("invalid canonical graph path endpoints")
+    return GraphPath(typed_nodes, typed_relationships)
 
 
 _SIMPLE_DECODERS: dict[str, Callable[[object], GraphValue]] = {
@@ -391,9 +421,14 @@ def _statistics(stats: dict[str, object]) -> GraphStatistics:
         value = stats.get(key)
         if value is None:
             return None
-        if key == "graph_version" and isinstance(value, bytes):
-            return int(value)
-        return _integer(value)
+        if isinstance(value, bytes):
+            if not value.isdigit() or len(value) > 20:
+                raise ValueError("invalid canonical unsigned graph statistic")
+            value = int(value)
+        parsed = _integer(value)
+        if not 0 <= parsed < (1 << 64):
+            raise ValueError("canonical graph statistic outside unsigned 64-bit range")
+        return parsed
 
     cached = stats.get("cached_execution")
     duration = stats.get("execution_time_ms")

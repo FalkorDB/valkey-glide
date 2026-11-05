@@ -7,11 +7,14 @@ import gc
 import importlib
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 import uuid
 import weakref
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -32,6 +35,7 @@ from glide_shared import (
     ProtocolVersion,
     ReadFrom,
     RequestError,
+    TimeoutError,
 )
 
 ALL_TAGS = (
@@ -176,6 +180,147 @@ def assert_all_tags(result):
 
 def graph_key():
     return f"glide-python-graph-{uuid.uuid4().hex}"
+
+
+class _GraphResponseGate:
+    """Forward real server traffic while holding graph replies for two callers."""
+
+    def __init__(self, address):
+        self.address = address
+        self.armed = threading.Event()
+        self.submitted = threading.Event()
+        self.release = threading.Event()
+        self.stopped = threading.Event()
+        self.lock = threading.Lock()
+        self.query_count = 0
+        self.connections = []
+        self.threads = []
+        self.listener = socket.socket()
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen()
+        self.listener.settimeout(0.1)
+        self.port = self.listener.getsockname()[1]
+        self.accept_thread = self._start(self._accept)
+
+    def _start(self, target, *args):
+        thread = threading.Thread(target=target, args=args, daemon=True)
+        self.threads.append(thread)
+        thread.start()
+        return thread
+
+    def _accept(self):
+        while not self.stopped.is_set():
+            try:
+                incoming, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            upstream = socket.create_connection(self.address, timeout=5)
+            upstream.settimeout(None)
+            self.connections.extend((incoming, upstream))
+            self._start(self._forward, incoming, upstream, False)
+            self._start(self._forward, upstream, incoming, True)
+
+    def _forward(self, source, destination, response):
+        tail = b""
+        marker = b"GRAPH.RO_QUERY"
+        try:
+            while not self.stopped.is_set():
+                data = source.recv(65536)
+                if not data:
+                    return
+                if self.armed.is_set():
+                    if response:
+                        if not self.release.wait(10):
+                            return
+                    else:
+                        combined = tail + data
+                        with self.lock:
+                            self.query_count += combined.count(marker)
+                            submitted = self.query_count >= 2
+                        tail = combined[-(len(marker) - 1) :]
+                        if submitted:
+                            self.submitted.set()
+                destination.sendall(data)
+        except OSError:
+            if not self.stopped.is_set():
+                raise
+
+    def close(self):
+        self.stopped.set()
+        self.release.set()
+        self.listener.close()
+        self.accept_thread.join(timeout=5)
+        assert not self.accept_thread.is_alive()
+        for connection in self.connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+        for thread in self.threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("protocol", [ProtocolVersion.RESP2, ProtocolVersion.RESP3])
+@pytest.mark.parametrize("close_inflight", [False, True], ids=["deadline", "close"])
+def test_sync_native_graph_queries_overlap_and_keep_close_safe(
+    protocol, close_inflight
+):
+    from glide_sync import GlideClient
+
+    endpoint = os.environ.get("FALKORDB_STANDALONE_ENDPOINT")
+    assert endpoint, "Dedicated graph target requires FALKORDB_STANDALONE_ENDPOINT"
+    host, port = endpoint.rsplit(":", 1)
+    gate = _GraphResponseGate((host, int(port)))
+    client = None
+    keys = [graph_key(), graph_key()]
+    try:
+        client = GlideClient.create(
+            GlideClientConfiguration(
+                [NodeAddress("127.0.0.1", gate.port)],
+                protocol=protocol,
+                request_timeout=1000,
+            )
+        )
+        graphs = [client.select_graph(key) for key in keys]
+        for graph in graphs:
+            graph.query("CREATE ()")
+        gate.armed.set()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            calls = [
+                pool.submit(graph.ro_query, "RETURN $value", {"value": index})
+                for index, graph in enumerate(graphs)
+            ]
+            try:
+                assert gate.submitted.wait(3), "native graph calls serialized"
+                assert not any(call.done() for call in calls)
+                if close_inflight:
+                    client.close()
+                    assert client._deferred_core_client != client._ffi.NULL
+                    gate.release.set()
+                    assert [call.result(timeout=3).rows for call in calls] == [
+                        [[0]],
+                        [[1]],
+                    ]
+                    assert client._deferred_core_client == client._ffi.NULL
+                else:
+                    for call in calls:
+                        with pytest.raises(TimeoutError):
+                            call.result(timeout=3)
+                assert gate.query_count == 2, "a graph operation was replayed"
+            finally:
+                gate.release.set()
+    finally:
+        if client is not None:
+            client.close()
+        gate.close()
+        with GlideClient.create(
+            GlideClientConfiguration([NodeAddress(host, int(port))])
+        ) as cleanup:
+            cleanup.delete(keys)
 
 
 def test_sync_graph_conformance(config, topology):

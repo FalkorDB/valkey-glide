@@ -41,6 +41,13 @@ its parent client and an owned Rust `GraphContext`; closing that client rejects
 subsequent graph operations. `copy.copy(graph)` shares the retained native context.
 The last Python handle releases its native context automatically, while submitted
 requests hold independent Rust context clones through completion.
+Sync graph calls on one client can run concurrently. Closing the client rejects
+new graph calls immediately, but defers native cleanup until active calls finish
+or reach their original request deadline; it never replays their queries.
+Graph handles inherited across `fork()` are rejected before native dispatch,
+and their native cleanup is skipped in the child. For sync clients, select new
+graph handles on the rebuilt child client; for async clients, create a new client
+in the child before selecting graphs.
 The handle snapshots the currently selected database and its selection epoch.
 Any attempted `SELECT`, including switching away and back, invalidates existing
 handles. Select a new handle after a successful database change. Graph handles
@@ -60,7 +67,8 @@ accepted range is `0..2**63-1`. The client's request timeout still applies.
 Rows contain Python scalars/lists and shared `GraphNode`, `GraphRelationship`,
 `GraphPath`, `GraphMap`, `GraphPoint`, `GraphVector`, or `GraphTemporal` models.
 `GraphMap.entries` preserves order and duplicate keys, including entity
-properties. Temporal values retain their server kind and raw signed integer;
+properties. Integer statistics preserve the entire unsigned 64-bit range as
+Python integers. Temporal values retain their server kind and raw signed integer;
 they are not implicitly converted to Python date/time/timedelta objects.
 `query` targets a primary; `ro_query` uses the client's read strategy. Both
 surface server errors normally. Metadata resolution is performed by the Rust
@@ -74,7 +82,7 @@ both clients, explicitly run the isolated unit gate:
 
 ```bash
 cd python
-.env/bin/python -m pytest -o addopts= graph_tests/test_models.py
+.env/bin/python -m pytest -o addopts= graph_tests/test_models.py graph_tests/test_lifetime.py
 ```
 
 For the real-server gate, start the digest-pinned harness from the repository root
@@ -98,6 +106,9 @@ errors, database invalidation, and local handle/client lifetimes. Tests use
 unique graph keys and never flush a shared server.
 Entity queries also run with `inflight_requests_limit=1`, proving that query
 admission is released before the core resolves metadata dictionaries.
+The sync gate holds real server replies behind a local TCP proxy to prove that
+two native graph requests overlap, respect their own request deadlines, and
+survive concurrent client close without replay or premature native cleanup.
 Configured-replica read tests additionally cover sync, asyncio, trio, and uvloop
 under both protocols, with both primary and replica addresses configured.
 Replica-side `MONITOR` evidence must show the entity `GRAPH.RO_QUERY` and its
