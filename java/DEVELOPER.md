@@ -396,7 +396,7 @@ sixteen graph value kinds, exact signed integers, typed parameters, schema chang
 errors and client/database lifetime. Entity queries run with one inflight slot to verify metadata
 admission is released correctly. Additional RESP2/RESP3 cases reject graph selection through pooled
 clients during a lease, after release and on reuse. Isolated scopes expose no graph-selection API.
-Ownership tests cover native context release, shared operation clones, the existing phantom cleanup
+Ownership tests cover public idempotent `Graph.close()`, shared operation clones, the existing phantom cleanup
 worker, parent-close resource release, and live completion after the Java selection is released.
 Graph-only completion tests force dependent requests to run immediately after success and failure,
 verifying registry cleanup releases a one-slot inflight limit before exposing completion. Dedicated
@@ -418,13 +418,18 @@ export GLIDE_DOCKER_SERVERS=true
 ```
 
 The unit tests cover serialization and canonical-result materialization without a server.
-If validating Java-only edits against an already prepared native artifact, append
-`-x :client:buildRust`; this does **not** validate the JNI bridge or replace a native/live run.
-To reuse a shared debug JNI build, also pass `-PnativeLibDir=/absolute/path/to/target/debug`.
+To validate Java-only edits against an already prepared JNI artifact, pass
+`-PnativeLibDir=/absolute/path/to/target/debug`. This removes the implicit `buildRust` dependency
+from both `:client:test` and `copyNativeLib` (and therefore `graphTest`); it does **not** validate
+new native changes or replace a fresh native/live run. Explicit native tasks such as `buildAll`
+still build Rust.
 This lets `copyNativeLib` package the artifact after resource processing; manually copying into
 `client/build/resources/main` before Gradle runs is not sufficient because resource processing
 can remove those outputs.
 `graphTest` fails clearly when the harness endpoints or `GLIDE_DOCKER_SERVERS=true` are missing.
+The replica monitor executes `/usr/bin/python3` by default, never a relative command from `PATH`.
+If Python is installed elsewhere, pass `-PfalkordbPython=/absolute/path/to/python3`; relative paths
+are rejected.
 It always executes against the live topology rather than reusing cached or up-to-date test results.
 Stop only the harness state you started, never globally clean shared servers.
 

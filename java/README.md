@@ -353,6 +353,8 @@ public class Main {
 The standalone and cluster clients expose `selectGraph(name)`, which creates only a local
 handle: it does not connect, create a graph, or issue a server command. Query execution requires
 a FalkorDB-enabled server; an ordinary Valkey server does not implement these commands.
+The following statements run inside an existing `GlideClient` or `GlideClusterClient` scope named
+`client` (see the client setup examples above).
 
 ```java
 import glide.api.Graph;
@@ -360,16 +362,17 @@ import glide.api.models.graph.GraphQueryOptions;
 import glide.api.models.graph.GraphQueryResult;
 import java.util.Collections;
 
-Graph graph = client.selectGraph("people:{tenant}");
-GraphQueryResult result =
-        graph.query(
-                        "CREATE (p:Person {name:$name}) RETURN p",
-                        GraphQueryOptions.builder()
-                                .params(Collections.singletonMap("name", "Ada"))
-                                .timeoutMs(1000L)
-                                .build())
-                .get();
-GraphQueryResult names = graph.roQuery("MATCH (p:Person) RETURN p.name").get();
+try (Graph graph = client.selectGraph("people:{tenant}")) {
+    GraphQueryResult result =
+            graph.query(
+                            "CREATE (p:Person {name:$name}) RETURN p",
+                            GraphQueryOptions.builder()
+                                    .params(Collections.singletonMap("name", "Ada"))
+                                    .timeoutMs(1000L)
+                                    .build())
+                    .get();
+    GraphQueryResult names = graph.roQuery("MATCH (p:Person) RETURN p.name").get();
+}
 ```
 
 `query` and `roQuery` return `CompletableFuture<GraphQueryResult>` through the normal client
@@ -379,13 +382,17 @@ are null, Boolean, signed 64-bit integral numbers (including in-range `BigIntege
 Float/Double, Unicode String, List, and recursively string-keyed Map. Unsupported objects
 (including Java dates and graph entities), invalid Unicode, integer overflow and cyclic
 containers are rejected with a parameter path. Parameters are snapshotted when options are built.
+Parameter and nested map keys must be nonempty, at most 512 UTF-8 bytes, and contain no backticks
+or control characters, matching the shared core serializer's identifier constraints.
 
 `timeoutMs` is an optional server-side timeout in milliseconds, from zero through
 `Long.MAX_VALUE`; omitted and explicit zero remain distinct. It does not replace the client's
 request timeout. The client timeout does not cancel server-side execution.
 
 Results retain ordered columns (including duplicate names), ordered rows of `GraphValue`, and
-statistics with nullable known fields plus every raw server line. Graph maps and entity properties
+statistics with nullable known fields plus every raw server line. Unsigned 64-bit statistic counters
+and graph versions use `BigInteger`, preserving zero and values through `18446744073709551615`.
+Graph maps and entity properties
 use `GraphMap` entries to preserve order and duplicate keys. Nodes, relationships, paths,
 geographical points, float32 vectors and date/datetime/time/duration values have dedicated models.
 Temporal wrappers preserve the server's signed 64-bit seconds encoding without implicit timezone
@@ -393,9 +400,12 @@ conversion; `GraphDuration` preserves FalkorDB's calendar-offset encoding, not `
 
 A graph retains its parent client and a Rust `GraphContext` containing the graph key, selected
 database and database-selection lifetime. Internal native identifiers are never part of the public
-API. The existing phantom-reference cleanup worker releases the native selection after the final
-Java owner is collected; in-flight operations hold their own clones of the same Rust `Arc` context.
-Closing the parent invalidates operations and releases its retained native selections. A bound
+API. Use try-with-resources or the idempotent `Graph.close()` to release the local selection
+deterministically without closing its parent or deleting the server graph. Subsequent queries on
+that handle fail with a closing exception; already-dispatched operations hold independent clones of
+the same Rust `Arc` context and still complete. The existing phantom-reference cleanup worker remains
+a fallback when the final Java owner is collected. Closing the parent invalidates operations and
+releases its retained native selections. A bound
 completion callback retains the Java handle and parent while a query is pending. Any subsequent
 `SELECT` attempt invalidates existing graph handles, including switching away and back to the same
 database. Select a fresh handle after a successful database change. Isolated scopes and pooled lease

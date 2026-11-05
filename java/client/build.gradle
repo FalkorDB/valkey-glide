@@ -236,10 +236,14 @@ if (System.getenv("UBER_JAR_BUILD") == "true") {
     compileTestJava.dependsOn('copyNativeLib')
     javadoc.dependsOn('copyNativeLib')
     checkstyleMain.dependsOn('copyNativeLib')
-    copyNativeLib.dependsOn('buildRust')
+    if (!project.hasProperty('nativeLibDir')) {
+        copyNativeLib.dependsOn('buildRust')
+    }
 }
 
-test.dependsOn('buildRust')
+if (!project.hasProperty('nativeLibDir')) {
+    test.dependsOn('buildRust')
+}
 
 test {
     useJUnitPlatform {
@@ -260,6 +264,7 @@ tasks.register('graphTest', Test) {
     def nativeTempDir = layout.buildDirectory.dir('graph-native').get().asFile
     systemProperty 'java.io.tmpdir', nativeTempDir.absolutePath
     systemProperty 'falkordb.monitor.script', new File(rootProject.projectDir.parentFile, 'utils/falkordb_monitor.py').absolutePath
+    systemProperty 'falkordb.monitor.python', project.findProperty('falkordbPython') ?: '/usr/bin/python3'
     useJUnitPlatform {
         includeTags 'falkordb'
     }

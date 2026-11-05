@@ -16,6 +16,7 @@ import glide.api.models.graph.GraphPath;
 import glide.api.models.graph.GraphPoint;
 import glide.api.models.graph.GraphQueryResult;
 import glide.api.models.graph.GraphRelationship;
+import glide.api.models.graph.GraphStatistics;
 import glide.api.models.graph.GraphTime;
 import glide.api.models.graph.GraphValue;
 import glide.api.models.graph.GraphVectorF32;
@@ -142,10 +143,73 @@ class GraphResponseMapperTest {
                                         0.0,
                                         "graph_version",
                                         version)));
-        assertEquals(Long.valueOf(0), result.getStatistics().getNodesCreated());
+        assertEquals(BigInteger.ZERO, result.getStatistics().getNodesCreated());
         assertEquals(Boolean.FALSE, result.getStatistics().getCachedExecution());
         assertEquals(version, result.getStatistics().getGraphVersion());
         assertNull(result.getStatistics().getNodesDeleted());
+    }
+
+    private static final List<String> UNSIGNED_STATISTICS =
+            Arrays.asList(
+                    "labels_added",
+                    "labels_removed",
+                    "nodes_created",
+                    "nodes_deleted",
+                    "properties_set",
+                    "properties_removed",
+                    "relationships_created",
+                    "relationships_deleted",
+                    "indices_created",
+                    "indices_deleted",
+                    "graph_version");
+
+    @Test
+    void all_known_counters_preserve_full_unsigned_64_bit_range() {
+        for (Object value :
+                array(
+                        0L,
+                        Long.MAX_VALUE,
+                        BigInteger.ZERO,
+                        BigInteger.valueOf(Long.MAX_VALUE),
+                        BigInteger.ONE.shiftLeft(63),
+                        BigInteger.ONE.shiftLeft(64).subtract(BigInteger.ONE))) {
+            Map<String, Object> stats = fields("raw", array("unknown", "Nodes created: 0"));
+            for (String field : UNSIGNED_STATISTICS) {
+                stats.put(field, value);
+            }
+            GraphStatistics mapped =
+                    GraphResponseMapper.map(fields("columns", array(), "rows", array(), "statistics", stats))
+                            .getStatistics();
+            BigInteger expected = new BigInteger(value.toString());
+            assertEquals(expected, mapped.getLabelsAdded());
+            assertEquals(expected, mapped.getLabelsRemoved());
+            assertEquals(expected, mapped.getNodesCreated());
+            assertEquals(expected, mapped.getNodesDeleted());
+            assertEquals(expected, mapped.getPropertiesSet());
+            assertEquals(expected, mapped.getPropertiesRemoved());
+            assertEquals(expected, mapped.getRelationshipsCreated());
+            assertEquals(expected, mapped.getRelationshipsDeleted());
+            assertEquals(expected, mapped.getIndicesCreated());
+            assertEquals(expected, mapped.getIndicesDeleted());
+            assertEquals(expected, mapped.getGraphVersion());
+            assertEquals(Arrays.asList("unknown", "Nodes created: 0"), mapped.getRaw());
+        }
+    }
+
+    @Test
+    void rejects_malformed_known_unsigned_statistics() {
+        for (String field : UNSIGNED_STATISTICS) {
+            for (Object invalid :
+                    array(-1L, BigInteger.valueOf(-1), BigInteger.ONE.shiftLeft(64), 1.0, "1", null)) {
+                Map<String, Object> stats = fields("raw", array(), field, invalid);
+                assertThrows(
+                        RequestException.class,
+                        () ->
+                                GraphResponseMapper.map(
+                                        fields("columns", array(), "rows", array(), "statistics", stats)),
+                        field + "=" + invalid);
+            }
+        }
     }
 
     @Test

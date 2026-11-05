@@ -36,14 +36,15 @@ import glide.api.models.pool.ClientPool;
 import glide.api.models.pool.ClientPoolConfig;
 import glide.api.models.pool.PooledGlideClient;
 import glide.internal.AsyncRegistry;
-import glide.internal.NativeGraphContext;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
-import java.lang.reflect.Field;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -61,6 +62,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /** Real-server conformance; only :client:graphTest opts into this suite. */
 @Tag("falkordb")
@@ -113,7 +115,7 @@ class FalkorDBGraphConformanceTest {
             assertInstanceOf(GraphDate.class, all.getRows().get(0).get(13).getValue());
             assertInstanceOf(GraphTime.class, all.getRows().get(0).get(14).getValue());
             assertInstanceOf(GraphDuration.class, all.getRows().get(0).get(15).getValue());
-            assertEquals(Long.valueOf(2), all.getStatistics().getNodesCreated());
+            assertEquals(BigInteger.valueOf(2), all.getStatistics().getNodesCreated());
             assertFalse(all.getStatistics().getRaw().isEmpty());
 
             Map<String, Object> params = new LinkedHashMap<>();
@@ -149,17 +151,26 @@ class FalkorDBGraphConformanceTest {
             Graph lateGraph = client.selectGraph(key);
             CompletableFuture<GraphQueryResult> late =
                     lateGraph.roQuery("UNWIND range(1,100000) AS i RETURN sum(i)");
-            Field ownership = Graph.class.getDeclaredField("context");
-            ownership.setAccessible(true);
-            NativeGraphContext retained = (NativeGraphContext) ownership.get(lateGraph);
-            retained.close();
-            retained.close();
-            assertEquals(5000050000.0, late.get(10, TimeUnit.SECONDS).getRows().get(0).get(0).getValue());
+            lateGraph.close();
+            lateGraph.close();
+            assertEquals(
+                    5000050000.0,
+                    assertInstanceOf(
+                            Double.class, late.get(10, TimeUnit.SECONDS).getRows().get(0).get(0).getValue()));
             ExecutionException released =
                     assertThrows(
                             ExecutionException.class,
                             () -> lateGraph.query("RETURN 1").get(10, TimeUnit.SECONDS));
             assertInstanceOf(ClosingException.class, released.getCause());
+            ExecutionException releasedReadonly =
+                    assertThrows(
+                            ExecutionException.class,
+                            () -> lateGraph.roQuery("RETURN 1").get(10, TimeUnit.SECONDS));
+            assertInstanceOf(ClosingException.class, releasedReadonly.getCause());
+            assertEquals(
+                    1L,
+                    graph.roQuery("RETURN 1").get(10, TimeUnit.SECONDS).getRows().get(0).get(0).getValue());
+            assertEquals(1L, client.exists(new String[] {key}).get(10, TimeUnit.SECONDS));
             if (!cluster) {
                 GlideClient standalone = assertInstanceOf(GlideClient.class, client);
                 standalone.select(1).get(10, TimeUnit.SECONDS);
@@ -320,6 +331,12 @@ class FalkorDBGraphConformanceTest {
         assertEquals(0, AsyncRegistry.getPendingCount());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"python3", "./python3", ""})
+    void monitor_rejects_relative_python_paths(String python) {
+        assertThrows(IllegalArgumentException.class, () -> ReplicaMonitor.pythonExecutable(python));
+    }
+
     private static final class ReplicaMonitor implements AutoCloseable {
         private final Process process;
         private final BufferedReader output;
@@ -338,7 +355,8 @@ class FalkorDBGraphConformanceTest {
         private static ReplicaMonitor start(NodeAddress replica, String graph) throws Exception {
             Process process =
                     new ProcessBuilder(
-                                    "python3",
+                                    pythonExecutable(
+                                            System.getProperty("falkordb.monitor.python", "/usr/bin/python3")),
                                     System.getProperty("falkordb.monitor.script"),
                                     "--endpoint",
                                     replica.getHost() + ":" + replica.getPort(),
@@ -356,6 +374,15 @@ class FalkorDBGraphConformanceTest {
                 monitor.close();
                 throw failure;
             }
+        }
+
+        private static String pythonExecutable(String configured) throws IOException {
+            Path python = Paths.get(configured);
+            if (!python.isAbsolute()) {
+                throw new IllegalArgumentException(
+                        "FalkorDB monitor Python must be an absolute executable path");
+            }
+            return python.toRealPath().toString();
         }
 
         private String readLine() throws Exception {

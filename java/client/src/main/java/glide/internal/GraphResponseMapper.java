@@ -170,29 +170,35 @@ public final class GraphResponseMapper {
 
     private static GraphStatistics statistics(Object payload) {
         Map<?, ?> stats = fields(payload);
-        Object version = stats.get("graph_version");
-        BigInteger graphVersion =
-                version == null
-                        ? null
-                        : version instanceof Long
-                                ? BigInteger.valueOf((Long) version)
-                                : typed(version, BigInteger.class);
         return GraphStatistics.builder()
                 .raw(strings(required(stats, "raw")))
-                .labelsAdded(optional(stats, "labels_added", Long.class))
-                .labelsRemoved(optional(stats, "labels_removed", Long.class))
-                .nodesCreated(optional(stats, "nodes_created", Long.class))
-                .nodesDeleted(optional(stats, "nodes_deleted", Long.class))
-                .propertiesSet(optional(stats, "properties_set", Long.class))
-                .propertiesRemoved(optional(stats, "properties_removed", Long.class))
-                .relationshipsCreated(optional(stats, "relationships_created", Long.class))
-                .relationshipsDeleted(optional(stats, "relationships_deleted", Long.class))
-                .indicesCreated(optional(stats, "indices_created", Long.class))
-                .indicesDeleted(optional(stats, "indices_deleted", Long.class))
+                .labelsAdded(optionalUnsigned(stats, "labels_added"))
+                .labelsRemoved(optionalUnsigned(stats, "labels_removed"))
+                .nodesCreated(optionalUnsigned(stats, "nodes_created"))
+                .nodesDeleted(optionalUnsigned(stats, "nodes_deleted"))
+                .propertiesSet(optionalUnsigned(stats, "properties_set"))
+                .propertiesRemoved(optionalUnsigned(stats, "properties_removed"))
+                .relationshipsCreated(optionalUnsigned(stats, "relationships_created"))
+                .relationshipsDeleted(optionalUnsigned(stats, "relationships_deleted"))
+                .indicesCreated(optionalUnsigned(stats, "indices_created"))
+                .indicesDeleted(optionalUnsigned(stats, "indices_deleted"))
                 .cachedExecution(optional(stats, "cached_execution", Boolean.class))
                 .executionTimeMs(optional(stats, "execution_time_ms", Double.class))
-                .graphVersion(graphVersion)
+                .graphVersion(optionalUnsigned(stats, "graph_version"))
                 .build();
+    }
+
+    private static BigInteger optionalUnsigned(Map<?, ?> stats, String key) {
+        if (!stats.containsKey(key)) {
+            return null;
+        }
+        Object value = stats.get(key);
+        BigInteger number =
+                value instanceof Long ? BigInteger.valueOf((Long) value) : typed(value, BigInteger.class);
+        if (number.signum() < 0 || number.bitLength() > 64) {
+            throw invalid(key + " must be an unsigned 64-bit integer");
+        }
+        return number;
     }
 
     private static Map<?, ?> fields(Object value) {

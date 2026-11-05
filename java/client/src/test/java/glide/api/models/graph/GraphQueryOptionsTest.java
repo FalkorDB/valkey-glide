@@ -76,6 +76,71 @@ class GraphQueryOptionsTest {
     }
 
     @Test
+    void rejects_invalid_identifiers_at_every_map_depth_with_path() {
+        List<String> invalidKeys =
+                Arrays.asList(
+                        "",
+                        "back`tick",
+                        "line\nbreak",
+                        "\u0000",
+                        "\u001f",
+                        "\u007f",
+                        "\u0085",
+                        "\u009f",
+                        "\uD800",
+                        "\uDC00",
+                        repeat("a", 513),
+                        repeat("🌐", 129));
+        for (String key : invalidKeys) {
+            IllegalArgumentException root =
+                    assertThrows(
+                            IllegalArgumentException.class,
+                            () -> GraphQueryOptions.builder().params(Collections.singletonMap(key, 1)).build());
+            assertTrue(root.getMessage().startsWith("params key:"), root.getMessage());
+            IllegalArgumentException nested =
+                    assertThrows(
+                            IllegalArgumentException.class,
+                            () ->
+                                    GraphQueryOptions.builder()
+                                            .params(
+                                                    Collections.singletonMap(
+                                                            "nested", Arrays.asList(Collections.singletonMap(key, 1))))
+                                            .build());
+            assertTrue(nested.getMessage().startsWith("params.nested[0] key:"), nested.getMessage());
+        }
+    }
+
+    @Test
+    void accepts_unicode_identifiers_through_exact_utf8_byte_limit() {
+        for (String key :
+                Arrays.asList(
+                        "space key",
+                        "λ🌐",
+                        repeat("a", 511),
+                        repeat("a", 512),
+                        repeat("🌐", 127) + "abc",
+                        repeat("🌐", 128))) {
+            GraphQueryOptions options =
+                    GraphQueryOptions.builder()
+                            .params(Collections.singletonMap(key, Collections.singletonMap(key, 1)))
+                            .build();
+            assertEquals(key, options.toProtobuf().getEntries(0).getKey());
+            assertEquals(
+                    key, options.toProtobuf().getEntries(0).getValue().getMapValue().getEntries(0).getKey());
+        }
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        GraphQueryOptions.builder()
+                                .params(Collections.singletonMap(repeat("🌐", 128) + "a", 1))
+                                .build());
+    }
+
+    private static String repeat(String value, int count) {
+        return String.join("", Collections.nCopies(count, value));
+    }
+
+    @Test
     void rejects_cycles_and_deep_nesting_but_accepts_shared_acyclic_values() {
         List<Object> cycle = new ArrayList<>();
         cycle.add(cycle);

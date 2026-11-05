@@ -14,8 +14,10 @@ import java.util.concurrent.CompletableFuture;
 /**
  * A local FalkorDB graph selection. Graph lifetime is independent of graph existence on the server.
  * Closing the parent client makes subsequent operations fail with the normal closing exception.
+ * Closing this handle releases its selection without closing the parent or deleting the server
+ * graph.
  */
-public final class Graph {
+public final class Graph implements AutoCloseable {
     private final BaseClient parent;
     private final CommandManager commands;
     private final NativeGraphContext context;
@@ -42,6 +44,15 @@ public final class Graph {
     /** Return the database captured when this handle was selected. */
     public long getDatabase() {
         return context.getDatabase();
+    }
+
+    /**
+     * Release this local selection. This is idempotent and does not cancel already-dispatched
+     * queries; subsequent queries fail asynchronously with a closing exception.
+     */
+    @Override
+    public void close() {
+        context.close();
     }
 
     /** Execute a Cypher query. Use parameters rather than interpolating values into Cypher. */

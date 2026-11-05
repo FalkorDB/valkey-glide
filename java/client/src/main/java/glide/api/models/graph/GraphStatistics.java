@@ -10,21 +10,22 @@ import lombok.Value;
 
 /**
  * Optional known statistics and the complete unmodified raw server lines. Absent statistics are
- * null, never fabricated as zero. Unknown server lines remain available through raw.
+ * null, never fabricated as zero. Counters and graph version preserve the full unsigned 64-bit
+ * range as BigInteger. Unknown server lines remain available through raw.
  */
 @Value
 public class GraphStatistics {
     List<String> raw;
-    Long labelsAdded;
-    Long labelsRemoved;
-    Long nodesCreated;
-    Long nodesDeleted;
-    Long propertiesSet;
-    Long propertiesRemoved;
-    Long relationshipsCreated;
-    Long relationshipsDeleted;
-    Long indicesCreated;
-    Long indicesDeleted;
+    BigInteger labelsAdded;
+    BigInteger labelsRemoved;
+    BigInteger nodesCreated;
+    BigInteger nodesDeleted;
+    BigInteger propertiesSet;
+    BigInteger propertiesRemoved;
+    BigInteger relationshipsCreated;
+    BigInteger relationshipsDeleted;
+    BigInteger indicesCreated;
+    BigInteger indicesDeleted;
     Boolean cachedExecution;
     Double executionTimeMs;
     BigInteger graphVersion;
@@ -32,16 +33,16 @@ public class GraphStatistics {
     @Builder
     public GraphStatistics(
             List<String> raw,
-            Long labelsAdded,
-            Long labelsRemoved,
-            Long nodesCreated,
-            Long nodesDeleted,
-            Long propertiesSet,
-            Long propertiesRemoved,
-            Long relationshipsCreated,
-            Long relationshipsDeleted,
-            Long indicesCreated,
-            Long indicesDeleted,
+            BigInteger labelsAdded,
+            BigInteger labelsRemoved,
+            BigInteger nodesCreated,
+            BigInteger nodesDeleted,
+            BigInteger propertiesSet,
+            BigInteger propertiesRemoved,
+            BigInteger relationshipsCreated,
+            BigInteger relationshipsDeleted,
+            BigInteger indicesCreated,
+            BigInteger indicesDeleted,
             Boolean cachedExecution,
             Double executionTimeMs,
             BigInteger graphVersion) {

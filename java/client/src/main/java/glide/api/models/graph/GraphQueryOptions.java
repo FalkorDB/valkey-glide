@@ -7,6 +7,7 @@ import graph_request.GraphRequest.ParameterEntry;
 import graph_request.GraphRequest.ParameterList;
 import graph_request.GraphRequest.ParameterMap;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -104,7 +105,7 @@ public final class GraphQueryOptions {
                     throw invalid(path, "map keys must be strings");
                 }
                 String key = (String) entry.getKey();
-                validateUnicode(key, path + " key");
+                validateIdentifier(key, path + " key");
                 map.addEntries(
                         ParameterEntry.newBuilder()
                                 .setKey(key)
@@ -136,6 +137,22 @@ public final class GraphQueryOptions {
             } else if (Character.isLowSurrogate(current)) {
                 throw invalid(path, "unpaired Unicode surrogate");
             }
+        }
+    }
+
+    private static void validateIdentifier(String key, String path) {
+        validateUnicode(key, path);
+        if (key.isEmpty()) {
+            throw invalid(path, "map keys must be nonempty");
+        }
+        for (int i = 0; i < key.length(); i++) {
+            if (key.charAt(i) == '`' || Character.isISOControl(key.charAt(i))) {
+                throw invalid(path, "map keys must not contain backticks or control characters");
+            }
+        }
+        // Match the shared core serializer's FalkorDB identifier limit; Java does not encode Cypher.
+        if (key.getBytes(StandardCharsets.UTF_8).length > 512) {
+            throw invalid(path, "map keys must not exceed 512 UTF-8 bytes");
         }
     }
 

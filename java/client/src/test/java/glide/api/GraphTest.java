@@ -17,6 +17,7 @@ import static org.mockito.Mockito.when;
 import glide.api.models.exceptions.ClosingException;
 import glide.api.models.exceptions.RequestException;
 import glide.api.models.graph.GraphQueryOptions;
+import glide.api.models.graph.GraphQueryResult;
 import glide.api.models.pool.PooledGlideClient;
 import glide.api.models.scope.IsolatedScope;
 import glide.ffi.resolvers.NativeUtils;
@@ -122,6 +123,27 @@ class GraphTest {
         copy.roQuery("RETURN 2").join();
         verify(commands).selectGraphContext("graph");
         verify(commands, org.mockito.Mockito.times(2)).submitGraphQuery(eq(context), any());
+    }
+
+    @Test
+    void public_close_releases_only_selection_without_cancelling_inflight_query() {
+        CompletableFuture<Object> pending = new CompletableFuture<>();
+        when(commands.submitGraphQuery(eq(context), any())).thenReturn(pending);
+        CompletableFuture<GraphQueryResult> result;
+        Graph graph = client.selectGraph("graph");
+        try (Graph owned = graph) {
+            result = owned.roQuery("RETURN 1");
+        }
+        graph.close();
+        verify(context, org.mockito.Mockito.times(2)).close();
+        assertSame(client, graph.getClient());
+        assertFalse(result.isDone());
+        assertFalse(pending.isCancelled());
+        pending.complete(empty());
+        assertTrue(result.join().getRows().isEmpty());
+        verify(commands).selectGraphContext("graph");
+        verify(commands).submitGraphQuery(eq(context), any());
+        verifyNoMoreInteractions(commands);
     }
 
     private static Map<String, Object> empty() {
