@@ -44,7 +44,8 @@ pub async fn execute_request_with_context(graph: GraphContext, bytes: &[u8]) -> 
     .await
 }
 
-fn parse_request(bytes: &[u8]) -> RedisResult<QueryRequest> {
+/// Parse graph bridge bytes with the shared value-depth recursion budget.
+pub fn parse_request(bytes: &[u8]) -> RedisResult<QueryRequest> {
     let mut input = protobuf::CodedInputStream::from_bytes(bytes);
     // Each map level has Parameter, ParameterMap, and ParameterEntry messages.
     input.set_recursion_limit(3 * 128 + 8);

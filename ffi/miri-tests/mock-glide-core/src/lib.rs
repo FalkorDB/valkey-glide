@@ -7,6 +7,7 @@ pub mod compression;
 pub mod connection_request;
 pub mod errors;
 pub mod graph {
+    pub use glide_core::graph::parse_request;
     use std::sync::Arc;
 
     #[derive(Clone)]

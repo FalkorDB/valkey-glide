@@ -57,6 +57,81 @@ fn graph_selection_and_invalid_requests_do_not_connect() {
 }
 
 #[test]
+fn nested_graph_parameters_use_the_core_bridge_recursion_budget() {
+    use glide_core::graph_request::{
+        Parameter, ParameterEntry, ParameterList, ParameterMap, QueryRequest, parameter,
+    };
+    use protobuf::MessageField;
+
+    let adapter = lazy_client(&ClientType::SyncClient);
+    for map in [false, true] {
+        for depth in [60, 100, 127, 128, 129] {
+            let mut parameter = Parameter {
+                value: Some(parameter::Value::IntegerValue(42)),
+                ..Default::default()
+            };
+            for _ in 0..depth {
+                parameter = Parameter {
+                    value: Some(if map {
+                        parameter::Value::MapValue(ParameterMap {
+                            entries: vec![ParameterEntry {
+                                key: "key".into(),
+                                value: MessageField::some(parameter),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        })
+                    } else {
+                        parameter::Value::ListValue(ParameterList {
+                            values: vec![parameter],
+                            ..Default::default()
+                        })
+                    }),
+                    ..Default::default()
+                };
+            }
+            let request = QueryRequest {
+                graph_name: "depth".into(),
+                database: 5,
+                query: "RETURN\0".into(),
+                parameters: MessageField::some(ParameterMap {
+                    entries: vec![ParameterEntry {
+                        key: "p".into(),
+                        value: MessageField::some(parameter),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let bytes = request.write_to_bytes().unwrap();
+            // SAFETY: adapter and request remain live for the synchronous call;
+            // every returned error is freed before the adapter is closed once.
+            unsafe {
+                let result = graph_query(adapter, 1, bytes.as_ptr(), bytes.len());
+                assert!(!result.is_null());
+                assert!(!(*result).command_error.is_null());
+                let message = CStr::from_ptr((*(*result).command_error).command_error_message)
+                    .to_string_lossy()
+                    .into_owned();
+                free_command_result(result);
+                let expected = if depth <= 128 {
+                    "NUL"
+                } else {
+                    "maximum depth 128"
+                };
+                assert!(
+                    message.contains(expected),
+                    "map={map}, depth={depth}: {message}"
+                );
+            }
+        }
+    }
+    // SAFETY: all synchronous calls finished and all their results were freed.
+    unsafe { close_client(adapter) };
+}
+
+#[test]
 fn retained_graph_context_validates_identity_and_drops_after_client_close() {
     let adapter = lazy_client(&ClientType::SyncClient);
     // SAFETY: adapter, name, output slot, and requests remain live through each

@@ -4991,7 +4991,7 @@ unsafe fn copy_graph_request(request_bytes: *const u8, request_len: usize) -> Re
         // guarantees an initialized allocation that remains live for this call.
         unsafe { from_raw_parts(request_bytes, request_len) }.to_vec()
     };
-    glide_core::graph_request::QueryRequest::parse_from_bytes(&bytes)
+    glide_core::graph::parse_request(&bytes)
         .map(|_| bytes)
         .map_err(|error| {
             RedisError::from((
