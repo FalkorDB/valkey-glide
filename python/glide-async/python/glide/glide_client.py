@@ -1090,11 +1090,11 @@ class BaseClient(CoreCommands):
         This does not connect or create a graph. A handle rejects operations
         after the client's selected database changes or the client closes.
         """
-        from glide_shared.graph import validate_graph_name
+        from glide_shared.graph import _validate_graph_name
 
         from .graph import Graph
 
-        validate_graph_name(name)
+        _validate_graph_name(name)
         if getattr(self, "_graph_pool_managed", False):
             raise RequestError("Graph handles cannot retain a pooled client lease.")
         self._check_same_process()

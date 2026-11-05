@@ -173,7 +173,7 @@ def _validate_text(value: str, path: str, allow_nul: bool = False) -> None:
         raise ValueError(f"{path}: invalid Unicode string") from error
 
 
-def validate_graph_name(name: str) -> None:
+def _validate_graph_name(name: str) -> None:
     """Validate a graph name locally without opening a connection."""
     _validate_text(name, "graph_name")
     if not name or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in name):
@@ -257,7 +257,7 @@ def _parameters(
     return result
 
 
-def encode_graph_request(
+def _encode_graph_request(
     name: str,
     database: int,
     query: str,
@@ -267,7 +267,7 @@ def encode_graph_request(
     database_epoch: int = 0,
 ) -> bytes:
     """Encode graph parameters without JSON or floating-point integer coercion."""
-    validate_graph_name(name)
+    _validate_graph_name(name)
     _validate_text(query, "query")
     if timeout_ms is not None and (
         type(timeout_ms) is not int or not 0 <= timeout_ms < (1 << 63)
@@ -454,7 +454,7 @@ def _statistics(stats: dict[str, object]) -> GraphStatistics:
     )
 
 
-def decode_graph_result(value: object) -> GraphQueryResult:
+def _decode_graph_result(value: object) -> GraphQueryResult:
     """Materialize the Rust core's canonical envelope, never a compact response."""
     try:
         envelope = _mapping(value)

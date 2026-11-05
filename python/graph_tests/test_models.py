@@ -15,10 +15,10 @@ from glide_shared.graph import (
     GraphRelationship,
     GraphTemporal,
     GraphVector,
+    _decode_graph_result,
+    _encode_graph_request,
     _NativeGraphContext,
-    decode_graph_result,
-    encode_graph_request,
-    validate_graph_name,
+    _validate_graph_name,
 )
 from glide_shared.protobuf.graph_request_pb2 import QueryRequest
 
@@ -43,7 +43,7 @@ def test_native_context_copies_share_one_release():
 
 def encode(params=None, timeout=None, query="RETURN $value"):
     return QueryRequest.FromString(
-        encode_graph_request("graph", 7, query, params, timeout, True, 12)
+        _encode_graph_request("graph", 7, query, params, timeout, True, 12)
     )
 
 
@@ -52,7 +52,7 @@ def cell(kind, value):
 
 
 def result(cells, columns=None, statistics=None):
-    return decode_graph_result(
+    return _decode_graph_result(
         {
             b"columns": columns if columns is not None else [b"x"] * len(cells),
             b"rows": [cells],
@@ -142,7 +142,7 @@ def test_invalid_timeout_is_local(timeout):
 @pytest.mark.parametrize("name", ["", "a\0b", "a\nb", "a\x7fb", "\ud800", 1])
 def test_invalid_graph_selection_is_local(name):
     with pytest.raises((TypeError, ValueError)):
-        validate_graph_name(name)
+        _validate_graph_name(name)
 
 
 @pytest.mark.parametrize("key", ["", "tick`key", "a\0b", "a\nb", "é" * 257, 1])
@@ -254,7 +254,7 @@ def test_entities_paths_points_vectors_temporal_are_materialized():
 )
 def test_raw_or_malformed_envelopes_fail_closed(bad):
     with pytest.raises(RequestError, match="canonical graph"):
-        decode_graph_result(bad)
+        _decode_graph_result(bad)
 
 
 @pytest.mark.parametrize(

@@ -1068,11 +1068,11 @@ class BaseClient(CoreCommands):
         Selecting a different database invalidates existing graph handles.
         Inherited handles are rejected after fork; select a new one in the child.
         """
-        from glide_shared.graph import validate_graph_name
+        from glide_shared.graph import _validate_graph_name
 
         from .graph import Graph
 
-        validate_graph_name(name)
+        _validate_graph_name(name)
         if getattr(self, "_graph_pool_managed", False):
             raise RequestError("Graph handles cannot retain a pooled client lease.")
         with self._client_lock:

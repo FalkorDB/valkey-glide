@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING
 from glide_shared.graph import (
     GraphParameter,
     GraphQueryResult,
+    _decode_graph_result,
+    _encode_graph_request,
     _NativeGraphContext,
-    decode_graph_result,
-    encode_graph_request,
 )
 
 if TYPE_CHECKING:
@@ -45,7 +45,7 @@ class Graph:
         timeout_ms: int | None = None,
     ) -> GraphQueryResult:
         """Execute a parameterized query on the primary; timeout is milliseconds."""
-        request = encode_graph_request(
+        request = _encode_graph_request(
             self.graph_name,
             self.database,
             query,
@@ -54,7 +54,7 @@ class Graph:
             False,
             self._database_epoch,
         )
-        return decode_graph_result(
+        return _decode_graph_result(
             await self._client._execute_graph_request(request, self._native_context)
         )
 
@@ -65,7 +65,7 @@ class Graph:
         timeout_ms: int | None = None,
     ) -> GraphQueryResult:
         """Execute a read-only query using the client's configured read strategy."""
-        request = encode_graph_request(
+        request = _encode_graph_request(
             self.graph_name,
             self.database,
             query,
@@ -74,6 +74,6 @@ class Graph:
             True,
             self._database_epoch,
         )
-        return decode_graph_result(
+        return _decode_graph_result(
             await self._client._execute_graph_request(request, self._native_context)
         )
