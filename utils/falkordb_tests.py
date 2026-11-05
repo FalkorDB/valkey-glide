@@ -7,7 +7,9 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import select
+import shutil
 import signal
 import socket
 import subprocess
@@ -15,8 +17,9 @@ import sys
 import threading
 import unittest
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import falkordb_monitor as monitor
 from falkordb_cases import FIXTURES, Recorder, array, rows, scalar
@@ -396,14 +399,273 @@ class ProtocolTests(unittest.TestCase):
             )
 
 
+class HarnessTests(unittest.TestCase):
+    """Reject unsupported redirect topology before publishing usable endpoints."""
+
+    def test_cluster_requires_native_linux_before_docker_operations(self) -> None:
+        """Loopback publication alone does not make bridge redirects portable."""
+        harness = Harness(Path("unused-falkordb-state.json"))
+        with patch("falkordb_harness.sys.platform", "darwin"):
+            with patch("falkordb_harness.docker") as docker:
+                with self.assertRaisesRegex(RuntimeError, "native Linux host"):
+                    harness.start("cluster")
+                docker.assert_not_called()
+        self.assertEqual(harness.state, {})
+
+    def test_probe_every_advertised_endpoint(self) -> None:
+        """Published seed readiness cannot substitute for probing all redirects."""
+        nodes: list[dict[str, object]] = [
+            {"ip": f"172.25.0.{index}"} for index in range(2, 8)
+        ]
+        with patch("falkordb_harness.Connection") as connection:
+            conn = connection.return_value.__enter__.return_value
+            conn.command.return_value = Frame("simple", "PONG")
+            Harness.check_cluster_reachability(nodes)
+            self.assertEqual(connection.call_count, len(nodes))
+            self.assertEqual(
+                [call.args for call in connection.call_args_list],
+                [(node["ip"], 6379) for node in nodes],
+            )
+            self.assertEqual(connection.return_value.__exit__.call_count, len(nodes))
+
+    def test_unreachable_or_invalid_redirect_fails_with_actionable_error(self) -> None:
+        """Unreachable bridge IPs and non-Redis peers never pass readiness."""
+        for failure in (OSError("unreachable"), Frame("error", "NOPERM")):
+            with self.subTest(failure=failure):
+                with patch("falkordb_harness.Connection") as connection:
+                    if isinstance(failure, OSError):
+                        connection.side_effect = failure
+                    else:
+                        conn = connection.return_value.__enter__.return_value
+                        conn.command.return_value = failure
+                    with self.assertRaisesRegex(
+                        RuntimeError, "172.25.0.2:6379.*MOVED/ASK"
+                    ):
+                        Harness.check_cluster_reachability([{"ip": "172.25.0.2"}])
+                    if not isinstance(failure, OSError):
+                        connection.return_value.__exit__.assert_called_once()
+
+    def test_bridge_failure_cleans_owned_start_and_never_marks_ready(self) -> None:
+        """A Linux host with an unreachable bridge cannot export a partial cluster."""
+        harness = Harness(Path("unused-falkordb-state.json"))
+        with (
+            patch("falkordb_harness.sys.platform", "linux"),
+            patch("falkordb_harness.docker", return_value="owned-network") as docker,
+            patch.object(harness, "save"),
+            patch.object(harness, "add_node", return_value={"ip": "172.25.0.2"}),
+            patch.object(
+                harness,
+                "check_cluster_reachability",
+                side_effect=RuntimeError("unreachable bridge"),
+            ),
+            patch.object(harness, "stop") as stop,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unreachable bridge"):
+                harness.start("cluster")
+            stop.assert_called_once()
+            self.assertNotIn("ready", harness.state)
+            self.assertNotIn("environment", harness.state)
+            self.assertFalse(
+                any(call.args[0] == "exec" for call in docker.call_args_list)
+            )
+
+
+class RecordingTests(unittest.TestCase):
+    """Recording is a transaction across protocols, topology, cleanup and safety."""
+
+    def setUp(self) -> None:
+        """Use only a uniquely owned in-repository fixture directory."""
+        root = Path(__file__).resolve().parents[1]
+        self.directory = root / ".build" / f"falkordb-safety-{uuid.uuid4().hex}"
+        self.directory.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, self.directory)
+        for name in ("resp2.json", "resp3.json", "topology.json", "manifest.json"):
+            shutil.copyfile(FIXTURES / name, self.directory / name)
+        self.module = sys.modules[__name__]
+        fixtures = patch.object(self.module, "FIXTURES", self.directory)
+        fixtures.start()
+        self.addCleanup(fixtures.stop)
+
+    def snapshot(self) -> dict[str, bytes]:
+        """Include stray staging files, not just golden contents, in comparisons."""
+        return {path.name: path.read_bytes() for path in self.directory.iterdir()}
+
+    def fake_live(self, stack: ExitStack) -> tuple[MagicMock, MagicMock, MagicMock]:
+        """Mock owned servers, not any process-wide Docker or network state."""
+        harness = stack.enter_context(patch.object(self.module, "Harness"))
+        harness.return_value.nodes.return_value = [{"role": "standalone"}]
+        recorder = stack.enter_context(patch.object(self.module, "Recorder"))
+        recorder.return_value.run.side_effect = [
+            {"protocol": protocol, "cases": [], "staged": True} for protocol in (2, 3)
+        ]
+        for name in ("replica_affinity", "cluster_affinity", "cluster_ask"):
+            stack.enter_context(patch.object(self.module, name, return_value={}))
+        safety = stack.enter_context(
+            patch.object(self.module, "safety_tests", return_value=True)
+        )
+        return harness, recorder, safety
+
+    def test_later_gate_failures_preserve_complete_fixture_set(self) -> None:
+        """RESP3, replica, ASK, cleanup and safety failures cannot refresh RESP2."""
+        before = self.snapshot()
+        for gate in ("resp3", "replica", "ask", "cleanup", "safety", "safety_error"):
+            with self.subTest(gate=gate), ExitStack() as stack:
+                harness, recorder, safety = self.fake_live(stack)
+                failure = RuntimeError(f"simulated later {gate} failure")
+                if gate == "resp3":
+                    recorder.return_value.run.side_effect = [
+                        {"protocol": 2, "cases": []},
+                        failure,
+                    ]
+                elif gate == "cleanup":
+                    harness.return_value.stop.side_effect = failure
+                elif gate == "safety":
+                    safety.return_value = False
+                elif gate == "safety_error":
+                    safety.side_effect = failure
+                else:
+                    name = "replica_affinity" if gate == "replica" else "cluster_ask"
+                    stack.enter_context(
+                        patch.object(self.module, name, side_effect=[{}, failure])
+                    )
+                with self.assertRaises(RuntimeError):
+                    run(self.directory / "state.json", "all", True)
+                self.assertEqual(self.snapshot(), before)
+                harness.return_value.stop.assert_called_once()
+
+    def test_publish_waits_for_cleanup_and_safety_success(self) -> None:
+        """All three goldens publish together only after the final safety gate."""
+        before = self.snapshot()
+        with ExitStack() as stack:
+            harness, _, safety = self.fake_live(stack)
+
+            def cleanup() -> None:
+                self.assertEqual(self.snapshot(), before)
+
+            def final_gate() -> bool:
+                harness.return_value.stop.assert_called_once()
+                self.assertEqual(self.snapshot(), before)
+                return True
+
+            harness.return_value.stop.side_effect = cleanup
+            safety.side_effect = final_gate
+            result = run(self.directory / "state.json", "all", True)
+        for protocol in (2, 3):
+            fixture = json.loads((self.directory / f"resp{protocol}.json").read_text())
+            self.assertEqual(
+                fixture, {"protocol": protocol, "cases": [], "staged": True}
+            )
+        self.assertEqual(
+            json.loads((self.directory / "topology.json").read_text()), result
+        )
+        self.assertEqual(
+            (self.directory / "manifest.json").read_bytes(), before["manifest.json"]
+        )
+        self.assertEqual(set(self.snapshot()), set(before))
+
+    def test_partial_recording_rejected_before_resource_creation(self) -> None:
+        """The documented refresh command must run the complete topology gate."""
+        before = self.snapshot()
+        with patch.object(self.module, "Harness") as harness:
+            for topology in ("standalone", "replica"):
+                with self.subTest(topology=topology):
+                    with self.assertRaisesRegex(ValueError, "--topology all"):
+                        live(self.directory / "state.json", topology, True)
+            harness.assert_not_called()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_replay_never_publishes(self) -> None:
+        """A normal fixture comparison stays read-only even when every gate passes."""
+        before = self.snapshot()
+        with ExitStack() as stack:
+            _, recorder, _ = self.fake_live(stack)
+            recorder.return_value.run.side_effect = [
+                json.loads(before[f"resp{protocol}.json"]) for protocol in (2, 3)
+            ]
+            publish = stack.enter_context(patch.object(self.module, "publish_fixtures"))
+            run(self.directory / "state.json", "standalone", False)
+            publish.assert_not_called()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_staging_failure_preserves_existing_fixtures(self) -> None:
+        """A disk write failure cannot publish an earlier protocol's staged data."""
+        before = self.snapshot()
+        original = Path.write_text
+
+        def fail(path: Path, data: str, *, encoding: str = "utf-8") -> int:
+            if path.name.startswith(".resp3.json."):
+                raise OSError("simulated staging failure")
+            return original(path, data, encoding=encoding)
+
+        with patch.object(Path, "write_text", autospec=True, side_effect=fail):
+            with self.assertRaisesRegex(OSError, "staging failure"):
+                publish_fixtures({"resp2.json": "new resp2", "resp3.json": "new resp3"})
+        self.assertEqual(self.snapshot(), before)
+
+    def test_publication_failure_rolls_back_replacements(self) -> None:
+        """A later replace failure restores old files and removes newly added ones."""
+        original = Path.replace
+
+        def fail(path: Path, target: Path) -> Path:
+            if path.name.startswith(".resp3.json.") and path.suffix == ".next":
+                raise OSError("simulated publication failure")
+            return original(path, target)
+
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                if missing:
+                    (self.directory / "resp2.json").unlink()
+                before = self.snapshot()
+                with patch.object(Path, "replace", autospec=True, side_effect=fail):
+                    with self.assertRaisesRegex(OSError, "publication failure"):
+                        publish_fixtures(
+                            {"resp2.json": "new resp2", "resp3.json": "new resp3"}
+                        )
+                self.assertEqual(self.snapshot(), before)
+
+    def test_optimized_execution_fails_before_resource_or_fixture_changes(self) -> None:
+        """-O, -OO and environment optimization cannot skip any harness assertions."""
+        root = Path(__file__).resolve().parents[1]
+        state = self.directory / "optimized-state.json"
+        before = self.snapshot()
+        for flags, optimize in ((["-O"], ""), (["-OO"], ""), ([], "1"), ([], "2")):
+            env = dict(os.environ, PATH="", PYTHONOPTIMIZE=optimize)
+            for module in ("falkordb_cases", "falkordb_harness", "falkordb_tests"):
+                with self.subTest(flags=flags, optimize=optimize, module=module):
+                    if module == "falkordb_cases":
+                        command = [
+                            "-c",
+                            "import sys; sys.path.insert(0, 'utils'); import falkordb_cases",
+                        ]
+                    else:
+                        command = [str(root / "utils" / f"{module}.py")]
+                        if module == "falkordb_harness":
+                            command += ["start", "--state", str(state)]
+                        else:
+                            command += ["--record", "--state", str(state)]
+                    result = subprocess.run(
+                        [sys.executable, *flags, *command],
+                        cwd=root,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("optimized Python", result.stderr)
+                    self.assertEqual(self.snapshot(), before)
+
+
 def replica_affinity(harness: Harness, protocol: int) -> dict[str, object]:
     """Expose mismatched dictionaries if metadata escapes the chosen replica."""
     primary = next(node for node in harness.nodes() if node["role"] == "standalone")
     replica = next(node for node in harness.nodes() if node["role"] == "replica")
     key = f"glide-graph-affinity:{uuid.uuid4().hex}"
-    with Harness.connect(primary, protocol) as writer, Harness.connect(
-        replica, protocol
-    ) as reader:
+    with (
+        Harness.connect(primary, protocol) as writer,
+        Harness.connect(replica, protocol) as reader,
+    ):
         try:
             created = writer.command(
                 "GRAPH.QUERY", key, "CREATE (:Before {old:1})", "--compact"
@@ -549,9 +811,10 @@ def cluster_ask(harness: Harness, protocol: int) -> dict[str, object]:
     masters = [
         next(node for node in nodes if node["ip"] == entry[2][0]) for entry in slots
     ]
-    with Harness.connect(owner, protocol) as source, Harness.connect(
-        target, protocol
-    ) as destination:
+    with (
+        Harness.connect(owner, protocol) as source,
+        Harness.connect(target, protocol) as destination,
+    ):
         try:
             assert source.command("EXISTS", key).plain() == 0
             assert (
@@ -618,9 +881,14 @@ def cluster_ask(harness: Harness, protocol: int) -> dict[str, object]:
             destination.command("WAIT", 1, 10000)
 
 
-def live(state: Path, topology: str, record: bool) -> dict[str, object]:
-    """Own a topology for this invocation and always perform exact targeted cleanup."""
+def live(
+    state: Path, topology: str, record: bool
+) -> tuple[dict[str, object], dict[str, str]]:
+    """Capture in memory; no fixture changes before all gates and cleanup succeed."""
+    if record and topology != "all":
+        raise ValueError("Fixture recording requires --topology all")
     harness = Harness(state)
+    staged: dict[str, str] = {}
     try:
         harness.start(topology)
         endpoint = next(
@@ -633,8 +901,7 @@ def live(state: Path, topology: str, record: bool) -> dict[str, object]:
                 captured = Recorder(conn, protocol).run()
             path = FIXTURES / f"resp{protocol}.json"
             if record:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(
+                staged[path.name] = (
                     json.dumps(captured, indent=2, ensure_ascii=False) + "\n"
                 )
             else:
@@ -657,14 +924,70 @@ def live(state: Path, topology: str, record: bool) -> dict[str, object]:
         if topology == "all":
             path = FIXTURES / "topology.json"
             if record:
-                path.write_text(json.dumps(result, indent=2) + "\n")
+                staged[path.name] = json.dumps(result, indent=2) + "\n"
             else:
                 assert result == json.loads(
                     path.read_text()
                 ), "Topology fixture changed"
-        return result
+        return result, staged
     finally:
         harness.stop()
+
+
+def publish_fixtures(staged: dict[str, str]) -> None:
+    """Stage sibling files, then replace the complete set with rollback on error."""
+    token = uuid.uuid4().hex
+    pending: dict[Path, Path] = {}
+    backups: dict[Path, Path | None] = {}
+    published: list[Path] = []
+    try:
+        for name, content in staged.items():
+            path = FIXTURES / name
+            pending[path] = path.with_name(f".{name}.{token}.next")
+            pending[path].write_text(content, encoding="utf-8")
+            backups[path] = None
+            if path.exists():
+                backup = path.with_name(f".{name}.{token}.before")
+                backups[path] = backup
+                backup.write_bytes(path.read_bytes())
+        try:
+            for path, replacement in pending.items():
+                published.append(path)
+                replacement.replace(path)
+        except BaseException:
+            for path in reversed(published):
+                previous = backups[path]
+                if previous is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    previous.replace(path)
+                    backups[path] = None
+            raise
+    finally:
+        for replacement in pending.values():
+            replacement.unlink(missing_ok=True)
+        for previous in backups.values():
+            if previous is not None:
+                previous.unlink(missing_ok=True)
+
+
+def safety_tests() -> bool:
+    """Run every dependency-free safety gate before publishing captured fixtures."""
+    suite = unittest.TestSuite(
+        unittest.defaultTestLoader.loadTestsFromTestCase(case)
+        for case in (ProtocolTests, MonitorTests, HarnessTests, RecordingTests)
+    )
+    return unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful()
+
+
+def run(state: Path, topology: str, record: bool) -> dict[str, object]:
+    """Publish only after protocol, topology, cleanup and safety gates pass."""
+    result, staged = live(state, topology, record)
+    if not safety_tests():
+        raise RuntimeError("Safety tests failed; fixtures were not replaced")
+    if record:
+        publish_fixtures(staged)
+    return result
 
 
 def main() -> None:
@@ -685,13 +1008,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     state = args.state or Path(f".build/falkordb-{uuid.uuid4().hex}.json")
-    result = live(state, args.topology, args.record)
-    suite = unittest.TestSuite(
-        unittest.defaultTestLoader.loadTestsFromTestCase(case)
-        for case in (ProtocolTests, MonitorTests)
-    )
-    if not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful():
-        sys.exit(1)
+    result = run(state, args.topology, args.record)
     print(json.dumps(result, indent=2))
 
 

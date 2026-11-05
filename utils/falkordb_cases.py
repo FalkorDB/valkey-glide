@@ -10,6 +10,12 @@ from pathlib import Path
 
 from falkordb_protocol import Connection, Frame
 
+if not __debug__:
+    raise RuntimeError(
+        "FalkorDB recorder safety checks require assertions; optimized Python "
+        "(-O, -OO or PYTHONOPTIMIZE) is unsupported"
+    )
+
 FIXTURES = Path(__file__).resolve().parents[1] / "glide-core/tests/fixtures/graph"
 ALL_TAGS_QUERY = (
     "CREATE p=(a:Person:Researcher {name:'Ada',age:42})"

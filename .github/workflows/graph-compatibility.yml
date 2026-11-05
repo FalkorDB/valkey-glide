@@ -140,6 +140,7 @@ jobs:
                   target: x86_64-unknown-linux-gnu
                   rust-toolchain: ${{ steps.msrv.outputs.toolchain || 'stable' }}
                   language: ${{ matrix.binding }}
+                  engine-version: ${{ matrix.binding == 'rust' && '8.1' || '' }}
                   github-token: ${{ secrets.GITHUB_TOKEN }}
 
             - name: Install Java's required protobuf compiler

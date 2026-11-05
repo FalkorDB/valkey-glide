@@ -8,12 +8,19 @@ import argparse
 import json
 import signal
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Callable
 
 from falkordb_protocol import Connection
+
+if not __debug__:
+    raise RuntimeError(
+        "FalkorDB harness safety checks require assertions; optimized Python "
+        "(-O, -OO or PYTHONOPTIMIZE) is unsupported"
+    )
 
 IMAGE = (
     "falkordb/falkordb@sha256:"
@@ -80,6 +87,12 @@ class Harness:
         """Start fresh resources, or clean up this run if initialization fails."""
         if self.path.exists():
             raise FileExistsError(f"Refusing to overwrite state: {self.path}")
+        if topology in ("all", "cluster") and sys.platform != "linux":
+            raise RuntimeError(
+                "FalkorDB cluster tests require a native Linux host with directly "
+                "reachable Docker bridge addresses; Docker Desktop and remote "
+                "Docker daemons are unsupported"
+            )
         docker("info", "--format", "{{.ServerVersion}}")
         try:
             docker("image", "inspect", IMAGE)
@@ -146,6 +159,7 @@ class Harness:
                     )
                     for index in range(6)
                 ]
+                self.check_cluster_reachability(cluster)
                 docker(
                     "exec",
                     str(cluster[0]["id"]),
@@ -166,6 +180,25 @@ class Harness:
         except BaseException:
             self.stop()
             raise
+
+    @staticmethod
+    def check_cluster_reachability(cluster: list[dict[str, object]]) -> None:
+        """Verify every advertised redirect address from the actual client host."""
+        for node in cluster:
+            endpoint = f"{node['ip']}:6379"
+            try:
+                with Connection(str(node["ip"]), 6379, timeout=2) as conn:
+                    if conn.command("PING").plain() != "PONG":
+                        raise RuntimeError("Unexpected PING response")
+            except (OSError, RuntimeError, ConnectionError) as error:
+                raise RuntimeError(
+                    f"Advertised cluster endpoint {endpoint} is unreachable from "
+                    "this client host. FalkorDB cluster tests require a native "
+                    "Linux host with directly reachable Docker bridge addresses; "
+                    "a published loopback seed alone cannot route MOVED/ASK. "
+                    "Docker Desktop, remote Docker daemons and isolated client "
+                    "containers are unsupported."
+                ) from error
 
     def cluster_ready(self, cluster: list[dict[str, object]]) -> bool:
         """Check cluster ownership and synchronization of each replica."""

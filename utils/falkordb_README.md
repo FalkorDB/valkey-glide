@@ -3,6 +3,10 @@
 This is a dedicated **FalkorDB v6.0.3** gate, separate from ordinary Valkey jobs.
 It uses Python's standard library and Docker; it does not build Rust or bindings.
 Only synthetic, local test data is used.
+The recorder, lifecycle CLI and live gate require a normal, non-optimized Python
+interpreter. `-O`, `-OO` and nonzero `PYTHONOPTIMIZE` are rejected at import time,
+before Docker operations or fixture writes, because their safety assertions must
+never be stripped.
 
 ## Run
 
@@ -29,6 +33,14 @@ random loopback-only published ports, and per-container in-memory data. Servers
 run as uid 999 with a read-only root filesystem and `TEMP_FOLDER /data`; the image
 browser is not started. Readiness requires `PING`, the exact module version,
 replication links and cluster state. Replication assertions use `WAIT`, not sleeps.
+
+Cluster runs are supported only with clients running directly on a native Linux
+host whose local Docker bridge addresses are reachable. The published loopback
+seed is **not** a portable cluster endpoint: MOVED/ASK redirects advertise each
+node's bridge IP on port 6379. The harness probes every advertised address before
+marking the topology ready and cleans up its own resources on failure. Docker
+Desktop, remote Docker daemons and clients in isolated containers are unsupported;
+the harness does not remap advertised addresses or run binding clients in Docker.
 
 ## Share endpoints with dedicated binding tests
 
@@ -154,8 +166,13 @@ and `resp3.json` each record 46 commands and their actual recursive RESP frames:
 Each case has a fresh graph. Commands use `{graph}` as a replaceable key.
 Execution durations alone are normalized to `<milliseconds>`. Every numeric
 tag, cached flag, version, statistic and wire type is retained. The recorder
-independently asserts semantics **before** writing goldens; normal runs compare
-against the committed goldens. To intentionally refresh after review:
+independently asserts semantics; normal runs compare against the committed goldens.
+Recording requires `--topology all`: both protocol captures and topology results
+remain staged until all semantic, routing, cleanup and safety tests pass. Only
+then are `resp2.json`, `resp3.json` and `topology.json` replaced; an earlier failure
+leaves every committed fixture unchanged. Publication stages sibling files and
+rolls back earlier replacements if a later replacement fails. The provenance
+manifest and digest pin are not rewritten. To intentionally refresh after review:
 
 ```bash
 python3 utils/falkordb_tests.py --topology all --record
@@ -215,11 +232,15 @@ authentication or TLS coverage. Those require the dedicated binding/core tests.
 uses separate Linux-hosted matrix jobs for Rust/core, Go, Node, Java and Python.
 Each API job builds its own native binding with the existing shared dependency
 actions and binding build commands. No ordinary Valkey workflow is modified.
+The Rust/core job also installs plain Valkey 8.1 through the existing shared
+action for the unsupported-command regression; it does not replace the pinned
+FalkorDB topology used by graph queries.
 The Python job uses the existing `build-python-wrapper` action to build both
 sync and async clients; Java uses its normal `graphTest` JNI build dependencies.
 
-Every job creates its own UUID-named topology and distinct state file containing
-the binding, workflow run ID and attempt. All three `FALKORDB_*_ENDPOINT` values
+Every job creates its own UUID-named topology and uses a distinct state-file path
+containing the binding, workflow run ID and attempt. These identifiers are in the
+path, not fields in the persisted manifest. All three `FALKORDB_*_ENDPOINT` values
 are exported through `GITHUB_ENV`. API tests run directly on the Linux runner:
 loopback-published seeds and the cluster's advertised Docker bridge addresses
 are reachable from the native clients. Jobs do not run inside another container.
