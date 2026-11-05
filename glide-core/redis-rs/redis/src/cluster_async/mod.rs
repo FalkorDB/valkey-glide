@@ -484,6 +484,36 @@ where
         self.inner_core.conn_lock.read().address_for_route(&route)
     }
 
+    /// Borrow an existing routed connection for a compound, node-affine operation.
+    ///
+    /// The returned clone refers to the same multiplexed connection. Requests on
+    /// it are not replayed by the cluster retry loop after a disconnect.
+    pub async fn connection_for_route(
+        &self,
+        route: cluster_routing::SingleNodeRoutingInfo,
+    ) -> RedisResult<C> {
+        ClusterConnInner::get_connection(route.into(), self.inner_core.clone(), None)
+            .await
+            .map(|(_, connection)| connection)
+    }
+
+    /// Resolve a server-confirmed pre-execution redirect for an affine operation.
+    pub async fn connection_for_redirect(&self, error: &RedisError) -> RedisResult<C> {
+        let redirect = error.redirect(false).ok_or_else(|| {
+            RedisError::from((ErrorKind::ClientError, "Expected a MOVED or ASK redirect"))
+        })?;
+        ClusterConnInner::get_connection(
+            InternalSingleNodeRouting::Redirect {
+                redirect,
+                previous_routing: Box::new(InternalSingleNodeRouting::Random),
+            },
+            self.inner_core.clone(),
+            None,
+        )
+        .await
+        .map(|(_, connection)| connection)
+    }
+
     /// Routes an operation request to the appropriate handler.
     async fn route_operation_request(
         &mut self,

@@ -1,0 +1,3008 @@
+{
+    "protocol": 2,
+    "cases": [
+        {
+            "name": "all_tags",
+            "steps": [
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "CREATE p=(a:Person:Researcher {name:'Ada',age:42})-[r:KNOWS {since:2020}]->(b:Person {name:'Bob'}) RETURN null AS null_value, 'text' AS string_value, -9223372036854775808 AS integer_value, true AS boolean_value, 1.5 AS double_value, [1,null,{nested:[false,'x']}] AS list_value, r AS relationship_value, a AS node_value, p AS path_value, {first:1,second:'two'} AS map_value, point({latitude:1.5,longitude:2.5}) AS point_value, vecf32([1,2.5,-3]) AS vector_value, localdatetime('2020-01-02T03:04:05') AS datetime_value, date('2020-01-02') AS date_value, localtime('03:04:05') AS time_value, duration('P1Y2M3DT4H5M6S') AS duration_value",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "null_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "string_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "integer_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "boolean_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "double_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "list_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "relationship_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "node_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "path_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "map_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "point_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "vector_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "datetime_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "date_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "time_value"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "duration_value"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 1
+                                                    },
+                                                    {
+                                                        "type": "null",
+                                                        "value": null
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "text"
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 3
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": -9223372036854775808
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 4
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "true"
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 5
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "1.5"
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 6
+                                                    },
+                                                    {
+                                                        "type": "array",
+                                                        "value": [
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 3
+                                                                    },
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 1
+                                                                    }
+                                                                ]
+                                                            },
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 1
+                                                                    },
+                                                                    {
+                                                                        "type": "null",
+                                                                        "value": null
+                                                                    }
+                                                                ]
+                                                            },
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 10
+                                                                    },
+                                                                    {
+                                                                        "type": "array",
+                                                                        "value": [
+                                                                            {
+                                                                                "type": "bulk",
+                                                                                "value": "nested"
+                                                                            },
+                                                                            {
+                                                                                "type": "array",
+                                                                                "value": [
+                                                                                    {
+                                                                                        "type": "integer",
+                                                                                        "value": 6
+                                                                                    },
+                                                                                    {
+                                                                                        "type": "array",
+                                                                                        "value": [
+                                                                                            {
+                                                                                                "type": "array",
+                                                                                                "value": [
+                                                                                                    {
+                                                                                                        "type": "integer",
+                                                                                                        "value": 4
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "type": "bulk",
+                                                                                                        "value": "false"
+                                                                                                    }
+                                                                                                ]
+                                                                                            },
+                                                                                            {
+                                                                                                "type": "array",
+                                                                                                "value": [
+                                                                                                    {
+                                                                                                        "type": "integer",
+                                                                                                        "value": 2
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "type": "bulk",
+                                                                                                        "value": "x"
+                                                                                                    }
+                                                                                                ]
+                                                                                            }
+                                                                                        ]
+                                                                                    }
+                                                                                ]
+                                                                            }
+                                                                        ]
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 7
+                                                    },
+                                                    {
+                                                        "type": "array",
+                                                        "value": [
+                                                            {
+                                                                "type": "integer",
+                                                                "value": 0
+                                                            },
+                                                            {
+                                                                "type": "integer",
+                                                                "value": 0
+                                                            },
+                                                            {
+                                                                "type": "integer",
+                                                                "value": 0
+                                                            },
+                                                            {
+                                                                "type": "integer",
+                                                                "value": 1
+                                                            },
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "array",
+                                                                        "value": [
+                                                                            {
+                                                                                "type": "integer",
+                                                                                "value": 2
+                                                                            },
+                                                                            {
+                                                                                "type": "integer",
+                                                                                "value": 3
+                                                                            },
+                                                                            {
+                                                                                "type": "integer",
+                                                                                "value": 2020
+                                                                            }
+                                                                        ]
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 8
+                                                    },
+                                                    {
+                                                        "type": "array",
+                                                        "value": [
+                                                            {
+                                                                "type": "integer",
+                                                                "value": 0
+                                                            },
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 0
+                                                                    },
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 1
+                                                                    }
+                                                                ]
+                                                            },
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "array",
+                                                                        "value": [
+                                                                            {
+                                                                                "type": "integer",
+                                                                                "value": 0
+                                                                            },
+                                                                            {
+                                                                                "type": "integer",
+                                                                                "value": 2
+                                                                            },
+                                                                            {
+                                                                                "type": "bulk",
+                                                                                "value": "Ada"
+                                                                            }
+                                                                        ]
+                                                                    },
+                                                                    {
+                                                                        "type": "array",
+                                                                        "value": [
+                                                                            {
+                                                                                "type": "integer",
+                                                                                "value": 1
+                                                                            },
+                                                                            {
+                                                                                "type": "integer",
+                                                                                "value": 3
+                                                                            },
+                                                                            {
+                                                                                "type": "integer",
+                                                                                "value": 42
+                                                                            }
+                                                                        ]
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 9
+                                                    },
+                                                    {
+                                                        "type": "array",
+                                                        "value": [
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 6
+                                                                    },
+                                                                    {
+                                                                        "type": "array",
+                                                                        "value": [
+                                                                            {
+                                                                                "type": "array",
+                                                                                "value": [
+                                                                                    {
+                                                                                        "type": "integer",
+                                                                                        "value": 8
+                                                                                    },
+                                                                                    {
+                                                                                        "type": "array",
+                                                                                        "value": [
+                                                                                            {
+                                                                                                "type": "integer",
+                                                                                                "value": 0
+                                                                                            },
+                                                                                            {
+                                                                                                "type": "array",
+                                                                                                "value": [
+                                                                                                    {
+                                                                                                        "type": "integer",
+                                                                                                        "value": 0
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "type": "integer",
+                                                                                                        "value": 1
+                                                                                                    }
+                                                                                                ]
+                                                                                            },
+                                                                                            {
+                                                                                                "type": "array",
+                                                                                                "value": [
+                                                                                                    {
+                                                                                                        "type": "array",
+                                                                                                        "value": [
+                                                                                                            {
+                                                                                                                "type": "integer",
+                                                                                                                "value": 0
+                                                                                                            },
+                                                                                                            {
+                                                                                                                "type": "integer",
+                                                                                                                "value": 2
+                                                                                                            },
+                                                                                                            {
+                                                                                                                "type": "bulk",
+                                                                                                                "value": "Ada"
+                                                                                                            }
+                                                                                                        ]
+                                                                                                    },
+                                                                                                    {
+                                                                                                        "type": "array",
+                                                                                                        "value": [
+                                                                                                            {
+                                                                                                                "type": "integer",
+                                                                                                                "value": 1
+                                                                                                            },
+                                                                                                            {
+                                                                                                                "type": "integer",
+                                                                                                                "value": 3
+                                                                                                            },
+                                                                                                            {
+                                                                                                                "type": "integer",
+                                                                                                                "value": 42
+                                                                                                            }
+                                                                                                        ]
+                                                                                                    }
+                                                                                                ]
+                                                                                            }
+                                                                                        ]
+                                                                                    }
+                                                                                ]
+                                                                            },
+                                                                            {
+                                                                                "type": "array",
+                                                                                "value": [
+                                                                                    {
+                                                                                        "type": "integer",
+                                                                                        "value": 8
+                                                                                    },
+                                                                                    {
+                                                                                        "type": "array",
+                                                                                        "value": [
+                                                                                            {
+                                                                                                "type": "integer",
+                                                                                                "value": 1
+                                                                                            },
+                                                                                            {
+                                                                                                "type": "array",
+                                                                                                "value": [
+                                                                                                    {
+                                                                                                        "type": "integer",
+                                                                                                        "value": 0
+                                                                                                    }
+                                                                                                ]
+                                                                                            },
+                                                                                            {
+                                                                                                "type": "array",
+                                                                                                "value": [
+                                                                                                    {
+                                                                                                        "type": "array",
+                                                                                                        "value": [
+                                                                                                            {
+                                                                                                                "type": "integer",
+                                                                                                                "value": 0
+                                                                                                            },
+                                                                                                            {
+                                                                                                                "type": "integer",
+                                                                                                                "value": 2
+                                                                                                            },
+                                                                                                            {
+                                                                                                                "type": "bulk",
+                                                                                                                "value": "Bob"
+                                                                                                            }
+                                                                                                        ]
+                                                                                                    }
+                                                                                                ]
+                                                                                            }
+                                                                                        ]
+                                                                                    }
+                                                                                ]
+                                                                            }
+                                                                        ]
+                                                                    }
+                                                                ]
+                                                            },
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 6
+                                                                    },
+                                                                    {
+                                                                        "type": "array",
+                                                                        "value": [
+                                                                            {
+                                                                                "type": "array",
+                                                                                "value": [
+                                                                                    {
+                                                                                        "type": "integer",
+                                                                                        "value": 7
+                                                                                    },
+                                                                                    {
+                                                                                        "type": "array",
+                                                                                        "value": [
+                                                                                            {
+                                                                                                "type": "integer",
+                                                                                                "value": 0
+                                                                                            },
+                                                                                            {
+                                                                                                "type": "integer",
+                                                                                                "value": 0
+                                                                                            },
+                                                                                            {
+                                                                                                "type": "integer",
+                                                                                                "value": 0
+                                                                                            },
+                                                                                            {
+                                                                                                "type": "integer",
+                                                                                                "value": 1
+                                                                                            },
+                                                                                            {
+                                                                                                "type": "array",
+                                                                                                "value": [
+                                                                                                    {
+                                                                                                        "type": "array",
+                                                                                                        "value": [
+                                                                                                            {
+                                                                                                                "type": "integer",
+                                                                                                                "value": 2
+                                                                                                            },
+                                                                                                            {
+                                                                                                                "type": "integer",
+                                                                                                                "value": 3
+                                                                                                            },
+                                                                                                            {
+                                                                                                                "type": "integer",
+                                                                                                                "value": 2020
+                                                                                                            }
+                                                                                                        ]
+                                                                                                    }
+                                                                                                ]
+                                                                                            }
+                                                                                        ]
+                                                                                    }
+                                                                                ]
+                                                                            }
+                                                                        ]
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 10
+                                                    },
+                                                    {
+                                                        "type": "array",
+                                                        "value": [
+                                                            {
+                                                                "type": "bulk",
+                                                                "value": "first"
+                                                            },
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 3
+                                                                    },
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 1
+                                                                    }
+                                                                ]
+                                                            },
+                                                            {
+                                                                "type": "bulk",
+                                                                "value": "second"
+                                                            },
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 2
+                                                                    },
+                                                                    {
+                                                                        "type": "bulk",
+                                                                        "value": "two"
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 11
+                                                    },
+                                                    {
+                                                        "type": "array",
+                                                        "value": [
+                                                            {
+                                                                "type": "bulk",
+                                                                "value": "1.5"
+                                                            },
+                                                            {
+                                                                "type": "bulk",
+                                                                "value": "2.5"
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 12
+                                                    },
+                                                    {
+                                                        "type": "array",
+                                                        "value": [
+                                                            {
+                                                                "type": "bulk",
+                                                                "value": "1"
+                                                            },
+                                                            {
+                                                                "type": "bulk",
+                                                                "value": "2.5"
+                                                            },
+                                                            {
+                                                                "type": "bulk",
+                                                                "value": "-3"
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 13
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 1577934245
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 14
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 1577923200
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 15
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 11045
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 16
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 36907506
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Labels added: 2"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Nodes created: 2"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Properties set: 4"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Relationships created: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 1"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.RO_QUERY",
+                        "{graph}",
+                        "CALL db.labels()",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "label"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "Person"
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "Researcher"
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 1"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.RO_QUERY",
+                        "{graph}",
+                        "CALL db.relationshipTypes()",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "relationshipType"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "KNOWS"
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 1"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.RO_QUERY",
+                        "{graph}",
+                        "CALL db.propertyKeys()",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "propertyKey"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "name"
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "age"
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "since"
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 1"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "envelopes_schema_and_write_version",
+            "steps": [
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "CREATE (:Wrong)",
+                        "--compact",
+                        "version",
+                        "1"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "error",
+                                "value": "ERR invalid graph version"
+                            },
+                            {
+                                "type": "integer",
+                                "value": 0
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": ["EXISTS", "{graph}"],
+                    "response": {
+                        "type": "integer",
+                        "value": 0
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "CREATE (n:Alpha {name:'first'})",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Labels added: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Nodes created: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Properties set: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 1"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "MATCH(n) SET n.name='second'",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Properties set: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Properties removed: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 2"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "MATCH(n) SET n.name='must-not-execute'",
+                        "--compact",
+                        "version",
+                        "0"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "error",
+                                "value": "ERR invalid graph version"
+                            },
+                            {
+                                "type": "integer",
+                                "value": 1
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "MATCH(n) RETURN n.name",
+                        "--compact",
+                        "version",
+                        "1"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "n.name"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "second"
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 2"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "MATCH(n:Missing) RETURN n",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "n"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": []
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 2"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.RO_QUERY",
+                        "{graph}",
+                        "CREATE ()",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "graph.RO_QUERY is to be executed only on read-only queries"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "MATCH(n) SET n:Beta",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Labels added: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 3"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "version",
+                        "1"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "error",
+                                "value": "ERR invalid graph version"
+                            },
+                            {
+                                "type": "integer",
+                                "value": 2
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "version",
+                        "2"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "1"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 3
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 1
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 3"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "version",
+                        "2"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "1"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 3
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 1
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 3"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "recreation_requires_operation_scoped_dictionaries",
+            "steps": [
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "CREATE (:Before {old:1})",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Labels added: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Nodes created: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Properties set: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 1"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.RO_QUERY",
+                        "{graph}",
+                        "CALL db.labels()",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "label"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "Before"
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 1"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": ["GRAPH.DELETE", "{graph}"],
+                    "response": {
+                        "type": "simple",
+                        "value": "OK"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "CREATE (:After {new:2})",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Labels added: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Nodes created: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Properties set: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 1"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "MATCH(n) RETURN n",
+                        "--compact",
+                        "version",
+                        "1"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "n"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 8
+                                                    },
+                                                    {
+                                                        "type": "array",
+                                                        "value": [
+                                                            {
+                                                                "type": "integer",
+                                                                "value": 0
+                                                            },
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 0
+                                                                    }
+                                                                ]
+                                                            },
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "array",
+                                                                        "value": [
+                                                                            {
+                                                                                "type": "integer",
+                                                                                "value": 0
+                                                                            },
+                                                                            {
+                                                                                "type": "integer",
+                                                                                "value": 3
+                                                                            },
+                                                                            {
+                                                                                "type": "integer",
+                                                                                "value": 2
+                                                                            }
+                                                                        ]
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 1"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.RO_QUERY",
+                        "{graph}",
+                        "CALL db.labels()",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "label"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "After"
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 1"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.RO_QUERY",
+                        "{graph}",
+                        "CALL db.propertyKeys()",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "propertyKey"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "new"
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 1"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "name": "cypher_parameters",
+            "steps": [
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "CYPHER `x y`='a\\'b\\\\c\\n\\t\\r\\b\\f\\u263a' `map`={`a b`:[null,true,-9223372036854775808,1.5,'x']} RETURN $`x y` AS s, $map AS m",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "s"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "m"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2
+                                                    },
+                                                    {
+                                                        "type": "bulk",
+                                                        "value": "a'b\\c\n\t\r\b\f☺"
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 10
+                                                    },
+                                                    {
+                                                        "type": "array",
+                                                        "value": [
+                                                            {
+                                                                "type": "bulk",
+                                                                "value": "a b"
+                                                            },
+                                                            {
+                                                                "type": "array",
+                                                                "value": [
+                                                                    {
+                                                                        "type": "integer",
+                                                                        "value": 6
+                                                                    },
+                                                                    {
+                                                                        "type": "array",
+                                                                        "value": [
+                                                                            {
+                                                                                "type": "array",
+                                                                                "value": [
+                                                                                    {
+                                                                                        "type": "integer",
+                                                                                        "value": 1
+                                                                                    },
+                                                                                    {
+                                                                                        "type": "null",
+                                                                                        "value": null
+                                                                                    }
+                                                                                ]
+                                                                            },
+                                                                            {
+                                                                                "type": "array",
+                                                                                "value": [
+                                                                                    {
+                                                                                        "type": "integer",
+                                                                                        "value": 4
+                                                                                    },
+                                                                                    {
+                                                                                        "type": "bulk",
+                                                                                        "value": "true"
+                                                                                    }
+                                                                                ]
+                                                                            },
+                                                                            {
+                                                                                "type": "array",
+                                                                                "value": [
+                                                                                    {
+                                                                                        "type": "integer",
+                                                                                        "value": 3
+                                                                                    },
+                                                                                    {
+                                                                                        "type": "integer",
+                                                                                        "value": -9223372036854775808
+                                                                                    }
+                                                                                ]
+                                                                            },
+                                                                            {
+                                                                                "type": "array",
+                                                                                "value": [
+                                                                                    {
+                                                                                        "type": "integer",
+                                                                                        "value": 5
+                                                                                    },
+                                                                                    {
+                                                                                        "type": "bulk",
+                                                                                        "value": "1.5"
+                                                                                    }
+                                                                                ]
+                                                                            },
+                                                                            {
+                                                                                "type": "array",
+                                                                                "value": [
+                                                                                    {
+                                                                                        "type": "integer",
+                                                                                        "value": 2
+                                                                                    },
+                                                                                    {
+                                                                                        "type": "bulk",
+                                                                                        "value": "x"
+                                                                                    }
+                                                                                ]
+                                                                            }
+                                                                        ]
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 0"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "CYPHER `m`={\"key\":1} RETURN $m",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "Failed to parse the value of parameter 'm'"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "CYPHER `x``y`=1 RETURN 1",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "Invalid input '`x`': expected end of input, errCtx: CYPHER `x``y`=1 RETURN 1, pos 6"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "query_flag_bounds",
+            "steps": [
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "TIMEOUT",
+                        "0"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "1"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 3
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 1
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 0"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "TIMEOUT",
+                        "1"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "1"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 3
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 1
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 0"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "TIMEOUT",
+                        "9223372036854775807"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "1"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 3
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 1
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 0"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "TIMEOUT",
+                        "-1"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "Failed to parse query timeout value"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "TIMEOUT",
+                        "9223372036854775808"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "Failed to parse query timeout value"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "TIMEOUT",
+                        "01"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "Failed to parse query timeout value"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "TIMEOUT",
+                        "+1"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "Failed to parse query timeout value"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "TIMEOUT",
+                        " 1"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "Failed to parse query timeout value"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "version",
+                        "-1"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "Failed to parse graph version value"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "version",
+                        "4294967296"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "Failed to parse graph version value"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "version",
+                        "01"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "Failed to parse graph version value"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "version",
+                        "+1"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "Failed to parse graph version value"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "version",
+                        " 1"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "Failed to parse graph version value"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "version",
+                        "4294967295"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "error",
+                                "value": "ERR invalid graph version"
+                            },
+                            {
+                                "type": "integer",
+                                "value": 0
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": ["GRAPH.CONFIG", "SET", "TIMEOUT_MAX", "25"],
+                    "response": {
+                        "type": "simple",
+                        "value": "OK"
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "TIMEOUT",
+                        "25"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "1"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 3
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 1
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 1"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 0"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1",
+                        "--compact",
+                        "TIMEOUT",
+                        "26"
+                    ],
+                    "response": {
+                        "type": "error",
+                        "value": "The query TIMEOUT parameter value cannot exceed the TIMEOUT_MAX configuration parameter value"
+                    }
+                },
+                {
+                    "command": ["GRAPH.CONFIG", "SET", "TIMEOUT_MAX", "0"],
+                    "response": {
+                        "type": "simple",
+                        "value": "OK"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "temporal_seconds_and_verbose",
+            "steps": [
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN localdatetime('2020-01-02T03:04:05.123') AS fractional, duration('PT1S') AS second, duration('P1M') AS month, duration('P0D') AS zero",
+                        "--compact"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "fractional"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "second"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "month"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "zero"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 13
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 1577934245
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 16
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 1
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 16
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 2678400
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "type": "array",
+                                                "value": [
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 16
+                                                    },
+                                                    {
+                                                        "type": "integer",
+                                                        "value": 0
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 0"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                },
+                {
+                    "command": [
+                        "GRAPH.QUERY",
+                        "{graph}",
+                        "RETURN 1 AS i, true AS b, [1,'x'] AS l"
+                    ],
+                    "response": {
+                        "type": "array",
+                        "value": [
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "i"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "b"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "l"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "array",
+                                        "value": [
+                                            {
+                                                "type": "integer",
+                                                "value": 1
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "true"
+                                            },
+                                            {
+                                                "type": "bulk",
+                                                "value": "[1, x]"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "array",
+                                "value": [
+                                    {
+                                        "type": "bulk",
+                                        "value": "Cached execution: 0"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Query internal execution time: <milliseconds> milliseconds"
+                                    },
+                                    {
+                                        "type": "bulk",
+                                        "value": "Graph version: 0"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    ]
+}

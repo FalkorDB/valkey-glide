@@ -40,7 +40,9 @@ pub use types::*;
 
 use self::value_conversion::{convert_to_expected_type, expected_type_for_cmd, get_value_type};
 mod dispatch_permit;
+mod graph;
 use dispatch_permit::{Admission, DispatchPermit};
+use graph::GraphConnection;
 #[cfg(feature = "rdma")]
 mod rdma;
 #[cfg(feature = "rdma")]
@@ -508,6 +510,7 @@ pub struct ClientShared {
     // Tracks the current database selected at runtime (updated on SELECT commands).
     // Used by scope connections to inherit the parent's current database.
     current_database: Arc<AtomicU32>,
+    graph_database_epoch: AtomicU64,
     // Set before dispatching any SELECT-bearing command (single or batch); cleared
     // only by a successful release reset. `current_database` can under-report the
     // live db — a SELECT can apply on the connection even when the call errors or
@@ -850,6 +853,9 @@ impl Client {
         self.shared
             .current_database
             .store(database_id as u32, Ordering::Release);
+        self.shared
+            .graph_database_epoch
+            .fetch_and(!1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -1152,7 +1158,8 @@ impl Client {
     }
 
     fn is_reset_command(&self, cmd: &Cmd) -> bool {
-        cmd.command().is_some_and(|bytes| bytes == b"RESET")
+        cmd.arg_idx(0)
+            .is_some_and(|bytes| bytes.eq_ignore_ascii_case(b"RESET"))
     }
 
     async fn handle_reset_command(&mut self) -> RedisResult<()> {
@@ -1190,6 +1197,9 @@ impl Client {
         // RESET returns the connection to db 0; keep the drift signal the pool
         // release check reads (`current_database`) in sync, not just the resync db.
         self.shared.current_database.store(0, Ordering::Release);
+        self.shared
+            .graph_database_epoch
+            .fetch_and(!1, Ordering::AcqRel);
         self.update_stored_client_name(None).await?;
         self.update_stored_protocol(redis::ProtocolVersion::RESP2)
             .await?;
@@ -1301,35 +1311,63 @@ impl Client {
         routing: Option<RoutingInfo>,
         client: ClientWrapper,
         compression_manager: Option<Arc<CompressionManager>>,
+        affinity: Option<GraphConnection>,
     ) -> RedisResult<Value> {
-        let raw_value = match client {
-            ClientWrapper::Standalone(mut client) => client.send_command(&cmd).await,
-            ClientWrapper::Cluster { mut client, .. } => {
-                let final_routing = if let Some(RoutingInfo::SingleNode(
-                    SingleNodeRoutingInfo::Random,
-                )) = routing
-                {
-                    let cmd_name = cmd.command().unwrap_or_default();
-                    let cmd_name = String::from_utf8_lossy(&cmd_name);
-                    if redis::cluster_routing::is_readonly_cmd(cmd_name.as_bytes()) {
-                        RoutingInfo::SingleNode(SingleNodeRoutingInfo::Random)
-                    } else {
-                        log_warn(
-                            "send_command",
-                            format!(
-                                "User provided 'Random' routing which is not suitable for the writeable command '{cmd_name}'. Changing it to 'RandomPrimary'"
-                            ),
-                        );
-                        RoutingInfo::SingleNode(SingleNodeRoutingInfo::RandomPrimary)
-                    }
-                } else {
-                    routing
-                        .or_else(|| RoutingInfo::for_routable(cmd.as_ref()))
-                        .unwrap_or(RoutingInfo::SingleNode(SingleNodeRoutingInfo::Random))
-                };
-                client.route_command(&cmd, final_routing).await
+        let raw_value = if let Some(GraphConnection {
+            mut connection,
+            asking,
+        }) = affinity
+        {
+            if asking {
+                let mut pipeline = redis::pipe();
+                pipeline
+                    .cmd("ASKING")
+                    .ignore()
+                    .add_command(cmd.as_ref().clone());
+                connection
+                    .req_packed_commands(&pipeline, 1, 1, None)
+                    .await
+                    .and_then(|mut replies| {
+                        replies.pop().ok_or_else(|| {
+                            RedisError::from((
+                                ErrorKind::ResponseError,
+                                "Missing graph ASK response",
+                            ))
+                        })
+                    })
+            } else {
+                connection.send_packed_command(&cmd).await
             }
-            ClientWrapper::Lazy(_) => unreachable!("Lazy client should have been initialized"),
+        } else {
+            match client {
+                ClientWrapper::Standalone(mut client) => client.send_command(&cmd).await,
+                ClientWrapper::Cluster { mut client, .. } => {
+                    let final_routing = if let Some(RoutingInfo::SingleNode(
+                        SingleNodeRoutingInfo::Random,
+                    )) = routing
+                    {
+                        let cmd_name = cmd.command().unwrap_or_default();
+                        let cmd_name = String::from_utf8_lossy(&cmd_name);
+                        if redis::cluster_routing::is_readonly_cmd(cmd_name.as_bytes()) {
+                            RoutingInfo::SingleNode(SingleNodeRoutingInfo::Random)
+                        } else {
+                            log_warn(
+                                "send_command",
+                                format!(
+                                    "User provided 'Random' routing which is not suitable for the writeable command '{cmd_name}'. Changing it to 'RandomPrimary'"
+                                ),
+                            );
+                            RoutingInfo::SingleNode(SingleNodeRoutingInfo::RandomPrimary)
+                        }
+                    } else {
+                        routing
+                            .or_else(|| RoutingInfo::for_routable(cmd.as_ref()))
+                            .unwrap_or(RoutingInfo::SingleNode(SingleNodeRoutingInfo::Random))
+                    };
+                    client.route_command(&cmd, final_routing).await
+                }
+                ClientWrapper::Lazy(_) => unreachable!("Lazy client should have been initialized"),
+            }
         }?;
 
         // Post-process: decompress and convert to expected type.
@@ -1372,7 +1410,7 @@ impl Client {
         if self_clone.is_client_set_name_command(&cmd) {
             self_clone.handle_client_set_name_command(&cmd).await?;
         }
-        if self_clone.is_select_command(&cmd) {
+        if self_clone.is_select_command(&cmd) && value == Value::Okay {
             self_clone.handle_select_command(&cmd).await?;
         }
         if self_clone.is_auth_command(&cmd) {
@@ -1381,7 +1419,9 @@ impl Client {
         if self_clone.is_hello_command(&cmd) {
             self_clone.handle_hello_command(&cmd).await?;
         }
-        if self_clone.is_reset_command(&cmd) {
+        if self_clone.is_reset_command(&cmd)
+            && matches!(&value, Value::SimpleString(reply) if reply == "RESET")
+        {
             self_clone.handle_reset_command().await?;
         }
         Ok(value)
@@ -1404,6 +1444,9 @@ impl Client {
             // Flag a possible db change before dispatch (see `db_maybe_dirty`).
             if self.is_select_command(cmd) {
                 self.shared.db_maybe_dirty.store(true, Ordering::Release);
+                self.mark_graph_database_dirty();
+            } else if self.is_reset_command(cmd) {
+                self.mark_graph_database_dirty();
             }
             self.send_command_ungated(cmd, routing).await
         })
@@ -1427,7 +1470,7 @@ impl Client {
         }
 
         let permit = admission.reserve(self)?;
-        self.dispatch(permit, cmd, routing).await
+        self.dispatch(permit, cmd, routing, None).await
     }
 
     /// Send `cmd` with the client and in-flight slot in `permit`.
@@ -1441,6 +1484,7 @@ impl Client {
         permit: DispatchPermit,
         cmd: &'a mut Cmd,
         routing: Option<RoutingInfo>,
+        affinity: Option<GraphConnection>,
     ) -> RedisResult<Value> {
         let (client, tracker) = permit.into_parts();
         let request_timeout = get_request_timeout(cmd, self.request_timeout)?;
@@ -1517,6 +1561,7 @@ impl Client {
                     routing,
                     client,
                     compression_manager,
+                    affinity,
                 );
 
                 tokio::pin!(execute);
@@ -1621,6 +1666,7 @@ impl Client {
                     routing,
                     client,
                     compression_manager,
+                    affinity,
                 );
                 execute.await
             }
@@ -2104,8 +2150,13 @@ impl Client {
             // `db_maybe_dirty`). No MULTI tracking here: redis-rs brackets MULTI/EXEC
             // at pack time and it always closes.
             let drifted_db = self.last_select_db(pipeline);
+            let has_reset = pipeline.cmd_iter().any(|cmd| self.is_reset_command(cmd));
+            if has_reset {
+                self.mark_graph_database_dirty();
+            }
             if drifted_db.is_some() {
                 self.shared.db_maybe_dirty.store(true, Ordering::Release);
+                self.mark_graph_database_dirty();
             }
             let client = self.get_or_initialize_client().await?;
             let command_count = pipeline.cmd_iter().count();
@@ -2163,7 +2214,7 @@ impl Client {
             if let Some((idx, db)) = drifted_db
                 && Self::batch_reply_applied(&result, idx)
             {
-                self.apply_batch_select_db(db).await;
+                self.apply_batch_select_db(db, !has_reset).await;
             }
             result
         })
@@ -2200,8 +2251,13 @@ impl Client {
                 self.track_transaction_state(cmd);
             }
             let drifted_db = self.last_select_db(pipeline);
+            let has_reset = pipeline.cmd_iter().any(|cmd| self.is_reset_command(cmd));
+            if has_reset {
+                self.mark_graph_database_dirty();
+            }
             if drifted_db.is_some() {
                 self.shared.db_maybe_dirty.store(true, Ordering::Release);
+                self.mark_graph_database_dirty();
             }
             let client = self.get_or_initialize_client().await?;
 
@@ -2264,7 +2320,7 @@ impl Client {
             if let Some((idx, db)) = drifted_db
                 && Self::batch_reply_applied(&result, idx)
             {
-                self.apply_batch_select_db(db).await;
+                self.apply_batch_select_db(db, !has_reset).await;
             }
             result
         })
@@ -3357,6 +3413,7 @@ impl Client {
                         ))
                     }),
                     current_database: Arc::new(AtomicU32::new(request.database_id as u32)),
+                    graph_database_epoch: AtomicU64::new(0),
                     db_maybe_dirty: Arc::new(AtomicBool::new(false)),
                     last_iam_generation: Arc::new(AtomicU64::new(0)),
                     is_pool_managed: Arc::new(AtomicBool::new(false)),
@@ -3663,8 +3720,7 @@ impl Client {
         self.is_pool_managed.store(true, Ordering::Release);
     }
 
-    /// Whether this client has been marked pool-managed (test/introspection helper).
-    #[cfg(test)]
+    /// Whether this client is owned by a pool and must not escape a lease.
     pub(crate) fn is_pool_managed(&self) -> bool {
         self.is_pool_managed.load(Ordering::Acquire)
     }
@@ -3710,12 +3766,16 @@ impl Client {
     /// `handle_select_command` so all three db trackers stay in step: the reconnect
     /// db (`update_stored_database_id`), the OTel `db_namespace`, and
     /// `current_database` (read by scope connections).
-    async fn apply_batch_select_db(&mut self, db: u32) {
+    async fn apply_batch_select_db(&mut self, db: u32, graph_database_settled: bool) {
         if let Err(e) = self.update_stored_database_id(db as i64).await {
             log_warn(
                 "apply_batch_select_db",
                 format!("failed to update reconnect database to {db}: {e}"),
             );
+        } else if graph_database_settled {
+            self.shared
+                .graph_database_epoch
+                .fetch_and(!1, Ordering::AcqRel);
         }
         Arc::make_mut(&mut self.otel_metadata).db_namespace = db.to_string();
         self.shared.current_database.store(db, Ordering::Release);
@@ -3928,6 +3988,7 @@ impl Client {
                 latency_tracker: Arc::new(crate::timeout_watchdog::LatencyTracker::new(64)),
                 circuit_breaker: None,
                 current_database: Arc::new(AtomicU32::new(0)),
+                graph_database_epoch: AtomicU64::new(0),
                 db_maybe_dirty: Arc::new(AtomicBool::new(false)),
                 last_iam_generation: Arc::new(AtomicU64::new(0)),
                 is_pool_managed: Arc::new(AtomicBool::new(false)),
@@ -4009,6 +4070,7 @@ pub fn create_test_glide_client() -> Client {
             latency_tracker: Arc::new(crate::timeout_watchdog::LatencyTracker::new(64)),
             circuit_breaker: None,
             current_database: Arc::new(AtomicU32::new(0)),
+            graph_database_epoch: AtomicU64::new(0),
             db_maybe_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_iam_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             is_pool_managed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -4966,6 +5028,7 @@ mod tests {
                 latency_tracker: Arc::new(crate::timeout_watchdog::LatencyTracker::new(64)),
                 circuit_breaker: None,
                 current_database: Arc::new(AtomicU32::new(0)),
+                graph_database_epoch: AtomicU64::new(0),
                 db_maybe_dirty: Arc::new(AtomicBool::new(false)),
                 last_iam_generation: Arc::new(AtomicU64::new(0)),
                 is_pool_managed: Arc::new(AtomicBool::new(false)),
@@ -6070,7 +6133,7 @@ mod tests {
 
         let mut sent = redis::cmd("SET");
         sent.arg("key").arg("value");
-        let reply = client.dispatch(permit, &mut sent, None).await;
+        let reply = client.dispatch(permit, &mut sent, None, None).await;
         assert_eq!(reply, Ok(redis::Value::Okay));
     }
 

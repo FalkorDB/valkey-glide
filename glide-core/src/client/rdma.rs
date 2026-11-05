@@ -451,7 +451,7 @@ impl Client {
             // A reply that is ready wins over a revoke that is also ready: the
             // transfer did finish, so the caller should hear that it did.
             biased;
-            reply = self.dispatch(permit, &mut command, None) => Some(reply),
+            reply = self.dispatch(permit, &mut command, None, None) => Some(reply),
             () = loan.revoked() => None,
         };
         match reply {

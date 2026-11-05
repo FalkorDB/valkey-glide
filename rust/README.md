@@ -39,6 +39,8 @@ GLIDE binding.
   module (gRPC / HTTP / file exporters).
 - **Feature parity with the Python GLIDE wrapper** as the baseline for the API
   surface.
+- **FalkorDB Graph API** — local graph handles, typed parameters and decoded
+  graph values over the same standalone or cluster client (FalkorDB v6.0.3).
 
 ## Documentation
 
@@ -113,6 +115,43 @@ fn main() -> glide::ValkeyResult<()> {
     Ok(())
 }
 ```
+
+## FalkorDB queries
+
+Select a graph locally from an existing client; selecting does not create it or
+open a connection. `query` runs on a primary and `ro_query` honors the client's
+read strategy. Both async clients and the `sync` clients expose `select_graph`.
+
+```rust,no_run
+use glide::graph::{GraphParameter, GraphQueryOptions};
+use glide::{GlideClient, GlideClientConfiguration};
+use std::collections::BTreeMap;
+
+#[tokio::main]
+async fn main() -> glide::ValkeyResult<()> {
+    let client = GlideClient::connect(
+        GlideClientConfiguration::with_address("localhost", 6379),
+    ).await.expect("connect");
+    let graph = client.select_graph("people")?;
+    let options = GraphQueryOptions {
+        parameters: BTreeMap::from([
+            ("name".into(), GraphParameter::String("Alice".into())),
+        ]),
+        timeout_ms: Some(1_000),
+    };
+    let result = graph.query(
+        "CREATE (n:Person {name: $name}) RETURN n",
+        &options,
+    ).await?;
+    assert_eq!(result.columns, ["n"]);
+    Ok(())
+}
+```
+
+Graph integers and IDs are `i64`; temporal values retain the server's lossless
+payload rather than implying native calendar or elapsed-duration semantics.
+See the [Graph API compatibility guide](../docs/graph.md) for all value types,
+database lifetime, metadata ACLs and operation-scoped schema consistency limits.
 
 ## Cluster & routing
 

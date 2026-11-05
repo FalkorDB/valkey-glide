@@ -1,0 +1,43 @@
+{
+    "fixture_protocols": [2, 3],
+    "replica": {
+        "resp2": {
+            "replication_barrier": true,
+            "paused_replica_result_label": "Before",
+            "same_replica_dictionary_label": "Before",
+            "different_primary_dictionary_label": "After",
+            "same_physical_replica_connection": true,
+            "read_only_replica_rejects_writes": true
+        },
+        "resp3": {
+            "replication_barrier": true,
+            "paused_replica_result_label": "Before",
+            "same_replica_dictionary_label": "Before",
+            "different_primary_dictionary_label": "After",
+            "same_physical_replica_connection": true,
+            "read_only_replica_rejects_writes": true
+        }
+    },
+    "cluster": {
+        "resp2": {
+            "moved_is_preexecution": true,
+            "graph_key_selects_owner": true,
+            "query_and_metadata_same_physical_connection": true,
+            "cluster_replica_synchronized": true,
+            "ask_is_preexecution": true,
+            "asking_plus_query_single_pipeline": true,
+            "asking_permission_is_one_command_only": true,
+            "asking_plus_metadata_same_target": true
+        },
+        "resp3": {
+            "moved_is_preexecution": true,
+            "graph_key_selects_owner": true,
+            "query_and_metadata_same_physical_connection": true,
+            "cluster_replica_synchronized": true,
+            "ask_is_preexecution": true,
+            "asking_plus_query_single_pipeline": true,
+            "asking_permission_is_one_command_only": true,
+            "asking_plus_metadata_same_target": true
+        }
+    }
+}

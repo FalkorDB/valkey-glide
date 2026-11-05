@@ -53,6 +53,13 @@ pub struct SyncGlideClient {
 }
 
 impl SyncGlideClient {
+    /// Select a graph locally, with blocking query operations.
+    pub fn select_graph(&self, name: impl Into<String>) -> ValkeyResult<crate::graph::SyncGraph> {
+        self.inner
+            .select_graph(name)
+            .map(crate::graph::SyncGraph::new)
+    }
+
     /// Connect using the given standalone configuration (blocking).
     pub fn connect(config: GlideClientConfiguration) -> ValkeyResult<Self> {
         let inner = runtime().block_on(GlideClient::connect(config))?;
@@ -125,6 +132,13 @@ pub struct SyncGlideClusterClient {
 }
 
 impl SyncGlideClusterClient {
+    /// Select a graph locally, with blocking cluster-aware query operations.
+    pub fn select_graph(&self, name: impl Into<String>) -> ValkeyResult<crate::graph::SyncGraph> {
+        self.inner
+            .select_graph(name)
+            .map(crate::graph::SyncGraph::new)
+    }
+
     /// Connect using the given cluster configuration (blocking).
     pub fn connect(config: GlideClusterClientConfiguration) -> ValkeyResult<Self> {
         let inner = runtime().block_on(GlideClusterClient::connect(config))?;

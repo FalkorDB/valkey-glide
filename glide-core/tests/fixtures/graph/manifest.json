@@ -1,0 +1,79 @@
+{
+    "fixture_schema_version": 1,
+    "release": "FalkorDB v6.0.3",
+    "captured_on": "2026-11-03",
+    "source": {
+        "repository": "https://github.com/FalkorDB/FalkorDB",
+        "tag": "v6.0.3",
+        "commit": "c937aa4fafa9a0e9ab4afb007885be4fa30f1629",
+        "files_sha256": {
+            "src/reply.rs": "ee8d155d086ebc8fb69127f35f25f6225e883722446c32cdd074f95f2ccf66a1",
+            "src/graph_core.rs": "4b0829401c7798926f31e98452b91d5d021d13765803b966e1c879f940f8c9d3",
+            "src/commands/query_args.rs": "f8d94ed94959ecbe9a15404726eea5695bbdd61d3cc366fae381131db7e9d89b",
+            "graph/src/runtime/functions/temporal.rs": "29083178f5ab03a72884fd3ccbb4f093431ac5c84279b12a061fe99bf23bbec3",
+            "graph/src/parser/lexer.rs": "5b18d4195a134d1b7ed19e9ecb394170bcb69bd77291bcfcfa71e381094ef366",
+            "graph/src/parser/cypher.rs": "067e73d58c244c4e17b7549e3dc06d3aa5b7fb2beaff62f1dd1aeab202057f49"
+        }
+    },
+    "server": {
+        "image": "falkordb/falkordb@sha256:0fb85036662ce3d1206530a38fdf7df5a92b1fb31ad23087f8d4e89038ce0812",
+        "image_index_sha256": "0fb85036662ce3d1206530a38fdf7df5a92b1fb31ad23087f8d4e89038ce0812",
+        "linux_amd64_manifest_sha256": "a3f7f58482504f49bc1c0d703c472f73e6eb0fc421d0c31a391cc26e21753c33",
+        "linux_arm64_manifest_sha256": "788e4991aff2383c6ed9a12a469431d042b2f2e223dbbba8fc00851e94b301b2",
+        "tested_platform": "linux/amd64",
+        "redis_version": "8.10.2",
+        "module_name": "graph",
+        "module_version": 60003,
+        "provenance_limit": "Released source and digest-pinned binary inspected independently; no reproducible-build attestation is claimed."
+    },
+    "recording": {
+        "command": "python3 utils/falkordb_tests.py --topology all --record",
+        "replay_command": "python3 utils/falkordb_tests.py --topology all",
+        "files": ["resp2.json", "resp3.json", "topology.json"],
+        "commands_per_protocol": 46,
+        "graph_placeholder": "{graph}",
+        "response_encoding": "Recursive {type,value} RESP frames; numeric double text is retained exactly.",
+        "normalization": "Only measured Query internal execution time values become <milliseconds>; graph keys are command placeholders. Cached execution, versions, stats, numeric payloads and RESP types are not normalized.",
+        "topology_fixture": "Protocol-specific assertion results; dynamic host ports, IPs, slot numbers and node IDs are checked live, not committed."
+    },
+    "compact_tags": {
+        "1": "null",
+        "2": "string",
+        "3": "integer",
+        "4": "boolean as bulk true/false",
+        "5": "double as bulk decimal",
+        "6": "list of tagged values",
+        "7": "relationship [id,type_id,source_id,destination_id,properties]",
+        "8": "node [id,label_ids,properties]",
+        "9": "path [tagged node list,tagged relationship list]",
+        "10": "map with alternating key,tagged value entries",
+        "11": "point [latitude bulk decimal,longitude bulk decimal]",
+        "12": "vector [RESP2 bulk decimal or RESP3 double elements]",
+        "13": "datetime raw i64 epoch seconds",
+        "14": "date raw i64 midnight epoch seconds",
+        "15": "time raw i64 seconds on 1970-01-01",
+        "16": "duration raw i64 calendar-offset encoding"
+    },
+    "invariants": {
+        "properties": "Each entry is [property_key_id,tag,payload], not [property_key_id,[tag,payload]].",
+        "header": "Compact columns are [1,name], independently of the row value tag.",
+        "query_envelope": "[columns,rows,statistics] even with zero rows.",
+        "no_return_envelope": "[statistics].",
+        "schema_rejection": "[RESP error ERR invalid graph version,current_schema_version] before query execution.",
+        "graph_version_stat": "Write version; not a schema token.",
+        "dictionaries": "Operation-scoped and fetched on the same physical node/connection; graph recreation can reuse schema versions and IDs.",
+        "ask": "ASKING permission is consumed by one command. Each metadata fetch also requires ASKING on an importing node.",
+        "parameters": "CYPHER `identifier`=typed_literal prefix; nested map keys are identifiers, not JSON quoted strings.",
+        "parameter_key_subset": "Nonempty keys without embedded backticks/control characters; quote with backticks.",
+        "string_escapes": "Single-quoted literals accept escaped apostrophe, backslash, n, t, r, b, f and uXXXX.",
+        "timeout_ms": "Canonical decimal integer 0..9223372036854775807, additionally bounded by positive TIMEOUT_MAX.",
+        "schema_token": "Canonical decimal integer 0..4294967295."
+    },
+    "not_proven": [
+        "ARM64 execution",
+        "Cross-query dictionary-cache correctness",
+        "Ambiguous transport-failure replay safety",
+        "TLS or authentication",
+        "Automatic failover during a graph operation"
+    ]
+}
