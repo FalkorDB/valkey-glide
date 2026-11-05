@@ -94,6 +94,17 @@ from glide_shared import (
     GlideClusterClientConfiguration,
     GlideCredentialProvider,
     GlideError,
+    GraphMap,
+    GraphNode,
+    GraphParameter,
+    GraphPath,
+    GraphPoint,
+    GraphQueryResult,
+    GraphRelationship,
+    GraphStatistics,
+    GraphTemporal,
+    GraphValue,
+    GraphVector,
     HashFieldConditionalChange,
     HybridFilterPolicy,
     IamAuthConfig,
@@ -207,6 +218,7 @@ from .glide_client import (
     RdmaWindow,
     TGlideClient,
 )
+from .graph import Graph
 from .isolated_scope import IsolatedScope
 from .logger import Level as LogLevel
 from .logger import Logger
@@ -221,6 +233,18 @@ from .sync_commands.script import Script
 from .sync_commands.utils import get_min_compressed_size
 
 __all__ = [
+    "Graph",
+    "GraphMap",
+    "GraphNode",
+    "GraphParameter",
+    "GraphPath",
+    "GraphPoint",
+    "GraphQueryResult",
+    "GraphRelationship",
+    "GraphStatistics",
+    "GraphTemporal",
+    "GraphValue",
+    "GraphVector",
     # Client
     "TGlideClient",
     "GlideClient",

@@ -41,6 +41,14 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn current_database(&self) -> u32 {
+        0
+    }
+
+    pub fn graph_database_epoch(&self) -> u64 {
+        0
+    }
+
     pub async fn new(
         _request: ConnectionRequest,
         push_sender: Option<tokio::sync::mpsc::UnboundedSender<PushInfo>>,

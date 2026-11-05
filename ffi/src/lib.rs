@@ -4510,6 +4510,12 @@ impl ResponseArena {
                 self.nodes[idx].response_type = ResponseType::Int;
                 self.nodes[idx].int_value = n;
             }
+            Value::BigNumber(n) => {
+                let (ptr, len) = self.store_string(n.to_string().into_bytes());
+                self.nodes[idx].response_type = ResponseType::String;
+                self.nodes[idx].string_value = ptr;
+                self.nodes[idx].string_value_len = len;
+            }
             Value::Double(n) => {
                 self.nodes[idx].response_type = ResponseType::Float;
                 self.nodes[idx].float_value = n;
@@ -4729,6 +4735,23 @@ mod tests_response_arena {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[test]
+    fn graph_large_version_uses_lossless_decimal_string() {
+        let value = Value::BigNumber(u64::MAX.into());
+        let (response, arena) = valkey_value_to_arena_response(value, &[]).unwrap();
+        // SAFETY: the conversion returned a live response owned by this arena;
+        // read its immutable bytes before releasing the arena exactly once.
+        unsafe {
+            assert!(matches!((*response).response_type, ResponseType::String));
+            let bytes = from_raw_parts(
+                (*response).string_value.cast::<u8>(),
+                (*response).string_value_len as usize,
+            );
+            assert_eq!(bytes, u64::MAX.to_string().as_bytes());
+            free_response_arena(arena);
+        }
+    }
+
     /// Owner for `Bytes::from_owner` that records when the allocation is
     /// released, so tests can observe whether a `Bytes` slice is still
     /// pinning its backing buffer (as zero-copy `BulkString`s pin the
@@ -4919,6 +4942,230 @@ pub unsafe extern "C-unwind" fn command(
             span_ptr,
         )
     }
+}
+
+/// Execute a graph-only protobuf request through the existing response transport.
+///
+/// The request is copied and decoded before returning, so callers may immediately
+/// release their input buffer. Results use the normal callback/pipe or synchronous
+/// `CommandResult` ownership rules.
+///
+/// # Safety
+///
+/// `client_adapter_ptr` must be a live pointer returned by [`create_client`].
+/// The caller must prevent [`close_client`] from racing this call.
+/// `request_bytes` must point to `request_len` initialized bytes for this call.
+/// For an asynchronous client, `request_id` must remain valid until completion.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn graph_query(
+    client_adapter_ptr: *const c_void,
+    request_id: usize,
+    request_bytes: *const u8,
+    request_len: usize,
+) -> *mut CommandResult {
+    // SAFETY: the caller keeps the original Arc alive and excludes close while
+    // this call acquires its own strong reference.
+    let adapter = unsafe {
+        Arc::increment_strong_count(client_adapter_ptr.cast::<ClientAdapter>());
+        Arc::from_raw(client_adapter_ptr.cast::<ClientAdapter>())
+    };
+    // SAFETY: the caller keeps the initialized request buffer live for this call.
+    let request = unsafe { copy_graph_request(request_bytes, request_len) };
+    let client = adapter.core.client.clone();
+    adapter.execute_request(request_id, async move {
+        glide_core::graph::execute_request(client, &request?).await
+    })
+}
+
+unsafe fn copy_graph_request(request_bytes: *const u8, request_len: usize) -> RedisResult<Vec<u8>> {
+    if request_len > isize::MAX as usize || (request_bytes.is_null() && request_len != 0) {
+        return Err(RedisError::from((
+            ErrorKind::ClientError,
+            "Invalid graph request buffer",
+        )));
+    }
+    let bytes = if request_len == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: non-null and representable length checked above; the caller
+        // guarantees an initialized allocation that remains live for this call.
+        unsafe { from_raw_parts(request_bytes, request_len) }.to_vec()
+    };
+    glide_core::graph_request::QueryRequest::parse_from_bytes(&bytes)
+        .map(|_| bytes)
+        .map_err(|error| {
+            RedisError::from((
+                ErrorKind::ClientError,
+                "Invalid graph request protobuf",
+                error.to_string(),
+            ))
+        })
+}
+
+/// Retain a selected Rust graph context without connecting or issuing I/O.
+///
+/// On success returns null and writes an owned context to `context_out`.
+/// On failure writes null and returns a synchronous error, even for asynchronous
+/// clients. Free that error with [`free_command_result`].
+///
+/// # Safety
+///
+/// `client_adapter_ptr` must remain live and must not race [`close_client`].
+/// `graph_name` must contain `graph_name_len` initialized bytes for this call.
+/// `context_out` must be a writable pointer. Release a successful context exactly
+/// once with [`graph_context_drop`], after all submissions using it return.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn graph_context_create(
+    client_adapter_ptr: *const c_void,
+    graph_name: *const u8,
+    graph_name_len: usize,
+    database: u32,
+    database_epoch: u64,
+    context_out: *mut *mut c_void,
+) -> *mut CommandResult {
+    if context_out.is_null() {
+        return create_error_result_with_redis_error(RedisError::from((
+            ErrorKind::ClientError,
+            "Missing graph context output",
+        )));
+    }
+    // SAFETY: the caller provides a writable output slot, cleared on every failure.
+    unsafe { *context_out = std::ptr::null_mut() };
+    let context = (|| {
+        if client_adapter_ptr.is_null()
+            || graph_name_len > isize::MAX as usize
+            || (graph_name.is_null() && graph_name_len != 0)
+        {
+            return Err(RedisError::from((
+                ErrorKind::ClientError,
+                "Invalid graph selection buffer",
+            )));
+        }
+        let name = if graph_name_len == 0 {
+            &[][..]
+        } else {
+            // SAFETY: checked non-null/representable length; caller guarantees
+            // initialized bytes for this synchronous local selection.
+            unsafe { from_raw_parts(graph_name, graph_name_len) }
+        };
+        let name = std::str::from_utf8(name)
+            .map_err(|_| RedisError::from((ErrorKind::ClientError, "Graph name must be UTF-8")))?;
+        // SAFETY: the caller excludes close while this live adapter is borrowed.
+        let adapter = unsafe { &*client_adapter_ptr.cast::<ClientAdapter>() };
+        let client = &adapter.core.client;
+        if database_epoch & 1 != 0
+            || client.graph_database_epoch() != database_epoch
+            || client.current_database() != database
+        {
+            return Err(RedisError::from((
+                ErrorKind::ClientError,
+                "Graph selection database or SELECT epoch changed",
+            )));
+        }
+        let context =
+            glide_core::graph::GraphContext::new(client.clone(), name.to_owned(), database)?;
+        if client.graph_database_epoch() != database_epoch {
+            return Err(RedisError::from((
+                ErrorKind::ClientError,
+                "Graph selection SELECT epoch changed",
+            )));
+        }
+        Ok(context)
+    })();
+    match context {
+        Ok(context) => {
+            // SAFETY: the output slot remains writable. Ownership of this Box
+            // transfers to the caller, which releases it with graph_context_drop.
+            unsafe { *context_out = Box::into_raw(Box::new(context)).cast() };
+            std::ptr::null_mut()
+        }
+        Err(error) => create_error_result_with_redis_error(error),
+    }
+}
+
+/// Release a retained graph context. Null is a no-op.
+///
+/// Pending requests own context clones and are independent of this allocation.
+///
+/// # Safety
+///
+/// A non-null pointer must come from [`graph_context_create`], must be released
+/// exactly once, and must not race a [`graph_query_with_context`] submission.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn graph_context_drop(context_ptr: *mut c_void) {
+    if !context_ptr.is_null() {
+        // SAFETY: the caller transfers the unique Box allocation back exactly once;
+        // pending queries retain independent clones of its inner Arc.
+        drop(unsafe { Box::from_raw(context_ptr.cast::<glide_core::graph::GraphContext>()) });
+    }
+}
+
+/// Execute with a retained context using the existing command response transport.
+///
+/// The context is cloned and request copied/decoded before asynchronous dispatch.
+/// The caller may drop the context and request bytes immediately after return.
+///
+/// # Safety
+///
+/// `client_adapter_ptr` must remain live and must not race [`close_client`].
+/// `context_ptr` must be a context selected on this client and must not be dropped
+/// until this function returns. The request buffer and callback identifier have
+/// the same requirements and result ownership as [`graph_query`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn graph_query_with_context(
+    client_adapter_ptr: *const c_void,
+    context_ptr: *const c_void,
+    request_id: usize,
+    request_bytes: *const u8,
+    request_len: usize,
+) -> *mut CommandResult {
+    // SAFETY: the caller excludes close while this call retains the live adapter.
+    let adapter = unsafe {
+        Arc::increment_strong_count(client_adapter_ptr.cast::<ClientAdapter>());
+        Arc::from_raw(client_adapter_ptr.cast::<ClientAdapter>())
+    };
+    let context = if context_ptr.is_null() {
+        Err(RedisError::from((
+            ErrorKind::ClientError,
+            "Missing retained graph context",
+        )))
+    } else {
+        // SAFETY: the caller keeps the Box live through this synchronous clone.
+        Ok(unsafe { &*context_ptr.cast::<glide_core::graph::GraphContext>() }.clone())
+    };
+    // SAFETY: the caller keeps initialized request bytes live through this copy.
+    let request = unsafe { copy_graph_request(request_bytes, request_len) };
+    adapter.execute_request(request_id, async move {
+        glide_core::graph::execute_request_with_context(context?, &request?).await
+    })
+}
+
+/// Read the client's currently selected database without connecting or issuing I/O.
+///
+/// # Safety
+///
+/// `client_adapter_ptr` must be a live pointer returned by [`create_client`].
+/// The caller must prevent [`close_client`] from racing this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn graph_current_database(client_adapter_ptr: *const c_void) -> u32 {
+    // SAFETY: the caller guarantees that the adapter remains live for this read.
+    let adapter = unsafe { &*client_adapter_ptr.cast::<ClientAdapter>() };
+    adapter.core.client.current_database()
+}
+
+/// Read the database-selection epoch without connecting or issuing I/O.
+///
+/// An odd epoch denotes an unsettled SELECT. Callers must reject selection when
+/// the epoch is odd or changes while reading the database snapshot.
+///
+/// # Safety
+///
+/// `client_adapter_ptr` must remain live and must not race [`close_client`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn graph_database_epoch(client_adapter_ptr: *const c_void) -> u64 {
+    // SAFETY: the caller guarantees that the adapter remains live for this read.
+    let adapter = unsafe { &*client_adapter_ptr.cast::<ClientAdapter>() };
+    adapter.core.client.graph_database_epoch()
 }
 
 /// Where routing info came from across the FFI boundary: legacy protobuf

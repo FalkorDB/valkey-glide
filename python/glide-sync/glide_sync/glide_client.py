@@ -11,6 +11,9 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
+    from glide_shared.graph import _NativeGraphContext
+
+    from .graph import Graph
     from .isolated_scope import IsolatedScope
 
 from glide_shared._fast_response import parse_response as _fast_parse_response
@@ -580,6 +583,7 @@ class RdmaRegion:
 
 
 class BaseClient(CoreCommands):
+    _graph_pool_managed: bool = False
 
     def __init__(self, config: BaseClientConfiguration):
         """
@@ -1050,6 +1054,62 @@ class BaseClient(CoreCommands):
                 raise TypeError("response_buffers entries must be writable")
             if not mv.c_contiguous:
                 raise TypeError("response_buffers entries must be C-contiguous")
+
+    def select_graph(self, name: str) -> "Graph":
+        """Select a graph locally without connecting or creating server state.
+
+        The handle retains this client and snapshots its current database.
+        Selecting a different database invalidates existing graph handles.
+        """
+        from glide_shared.graph import validate_graph_name
+
+        from .graph import Graph
+
+        validate_graph_name(name)
+        if getattr(self, "_graph_pool_managed", False):
+            raise RequestError("Graph handles cannot retain a pooled client lease.")
+        with self._client_lock:
+            if self._is_closed or self._core_client == self._ffi.NULL:
+                raise ClosingError("Client is closed.")
+            epoch = self._lib.graph_database_epoch(self._core_client)
+            database = self._lib.graph_current_database(self._core_client)
+            if epoch & 1 or epoch != self._lib.graph_database_epoch(self._core_client):
+                raise RequestError("Cannot select a graph while SELECT is unsettled.")
+        return Graph(self, name, database, epoch)
+
+    def _create_graph_context(
+        self, name: str, database: int, epoch: int
+    ) -> "_NativeGraphContext":
+        from glide_shared.graph import _NativeGraphContext
+
+        if self._graph_pool_managed:
+            raise RequestError("Graph handles cannot retain a pooled client lease.")
+        with self._client_lock:
+            if self._is_closed or self._core_client == self._ffi.NULL:
+                raise ClosingError("Client is closed.")
+            pointer = self._ffi.new("void **")
+            encoded = name.encode("utf-8")
+            error = self._lib.graph_context_create(
+                self._core_client, encoded, len(encoded), database, epoch, pointer
+            )
+            if error != self._ffi.NULL:
+                self._handle_cmd_result(error)
+            return _NativeGraphContext(pointer[0], self._lib.graph_context_drop)
+
+    def _execute_graph_request(
+        self, request: bytes, context: "_NativeGraphContext"
+    ) -> object:
+        if self._graph_pool_managed:
+            raise RequestError("Graph handles cannot retain a pooled client lease.")
+        # This is the same close guard used by selection. Hold it until the
+        # blocking FFI call returns; no native pointer can be freed underneath it.
+        with self._client_lock:
+            if self._is_closed or self._core_client == self._ffi.NULL:
+                raise ClosingError("Client is closed.")
+            result = self._lib.graph_query_with_context(
+                self._core_client, context.pointer, 0, request, len(request)
+            )
+        return self._handle_cmd_result(result)
 
     def _execute_command(
         self,

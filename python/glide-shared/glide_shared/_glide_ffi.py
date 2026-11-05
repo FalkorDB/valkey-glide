@@ -115,6 +115,26 @@ class _GlideFFI:
             void free_response_arena(void* arena_ptr);
             void free_command_result(CommandResult* command_result_ptr);
 
+            CommandResult* graph_query(
+                const void* client_adapter_ptr,
+                uintptr_t request_id,
+                const uint8_t* request_bytes,
+                size_t request_len
+            );
+            uint32_t graph_current_database(const void* client_adapter_ptr);
+            uint64_t graph_database_epoch(const void* client_adapter_ptr);
+            CommandResult* graph_context_create(
+                const void* client_adapter_ptr, const uint8_t* graph_name,
+                size_t graph_name_len, uint32_t database, uint64_t database_epoch,
+                void** context_out
+            );
+            void graph_context_drop(void* context_ptr);
+            CommandResult* graph_query_with_context(
+                const void* client_adapter_ptr, const void* context_ptr,
+                uintptr_t request_id, const uint8_t* request_bytes,
+                size_t request_len
+            );
+
             CommandResult* command(
                 const void* client_adapter_ptr,
                 uintptr_t channel,

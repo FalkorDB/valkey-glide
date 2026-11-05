@@ -15,6 +15,34 @@ use miri_tests::{
 use protobuf::Message;
 use std::ffi::{CStr, CString, c_char};
 use std::ptr;
+use std::sync::Mutex;
+
+static GRAPH_COMPLETION: Mutex<Option<(usize, Vec<u8>)>> = Mutex::new(None);
+
+unsafe extern "C-unwind" fn retained_graph_success(
+    id: usize,
+    response: *const miri_tests::CommandResponse,
+) {
+    // SAFETY: the response belongs to this callback and its initialized string
+    // bytes remain live until they are copied and the response is freed below.
+    unsafe {
+        let bytes = std::slice::from_raw_parts(
+            (*response).string_value.cast::<u8>(),
+            (*response).string_value_len as usize,
+        )
+        .to_vec();
+        miri_tests::free_command_response(response.cast_mut());
+        *GRAPH_COMPLETION.lock().unwrap() = Some((id, bytes));
+    }
+}
+
+unsafe extern "C-unwind" fn retained_graph_failure(
+    _id: usize,
+    _message: *const c_char,
+    _kind: glide_core::errors::RequestErrorType,
+) {
+    panic!("valid mocked graph request cannot fail");
+}
 
 fn create_connection_request(port: u16) -> Vec<u8> {
     let host = "localhost";
@@ -92,14 +120,147 @@ fn create_client_test() {
 }
 
 #[test]
+fn graph_result_outlives_request_and_adapter() {
+    let connection_request = create_connection_request(6378);
+    let client_type = ClientType::SyncClient;
+    let mut request = glide_core::graph_request::QueryRequest::new();
+    request.graph_name = "graph".into();
+    request.query = "RETURN 9223372036854775807".into();
+    let mut request_bytes = request.write_to_bytes().unwrap();
+    let expected = request_bytes.clone();
+
+    // SAFETY: each input buffer and client type stays live for its FFI call.
+    // The adapter and connection response are released once; the response arena
+    // remains live independently until free_command_result below.
+    unsafe {
+        let connection = create_client(
+            connection_request.as_ptr(),
+            connection_request.len(),
+            &client_type,
+            None,
+            None,
+            0,
+        );
+        let adapter = (*connection).conn_ptr;
+        free_connection_response(connection.cast_mut());
+        assert_eq!(miri_tests::graph_current_database(adapter), 0);
+        assert_eq!(miri_tests::graph_database_epoch(adapter), 0);
+        let result =
+            miri_tests::graph_query(adapter, 17, request_bytes.as_ptr(), request_bytes.len());
+        request_bytes.fill(0);
+        drop(request_bytes);
+        close_client(adapter);
+
+        assert!((*result).command_error.is_null());
+        let response = &*(*result).response;
+        assert_eq!(
+            std::slice::from_raw_parts(
+                response.string_value.cast::<u8>(),
+                response.string_value_len as usize,
+            ),
+            expected,
+        );
+        miri_tests::free_command_result(result);
+    }
+}
+
+#[test]
+fn malformed_graph_request_uses_existing_error_ownership() {
+    let connection_request = create_connection_request(6378);
+    let client_type = ClientType::SyncClient;
+    // SAFETY: all FFI inputs remain live for each call. Every returned
+    // connection and result is freed exactly once with its matching API.
+    unsafe {
+        let connection = create_client(
+            connection_request.as_ptr(),
+            connection_request.len(),
+            &client_type,
+            None,
+            None,
+            0,
+        );
+        let adapter = (*connection).conn_ptr;
+        free_connection_response(connection.cast_mut());
+        let malformed = [0xff];
+        let result = miri_tests::graph_query(adapter, 18, malformed.as_ptr(), 1);
+        assert!(!(*result).command_error.is_null());
+        assert!((*result).response.is_null());
+        miri_tests::free_command_result(result);
+        let result = miri_tests::graph_query(adapter, 19, ptr::null(), 1);
+        assert!(!(*result).command_error.is_null());
+        miri_tests::free_command_result(result);
+        close_client(adapter);
+    }
+}
+
+#[test]
+fn retained_graph_context_survives_release_before_late_completion() {
+    let connection_request = create_connection_request(6378);
+    let client_type = ClientType::AsyncClient {
+        success_callback: retained_graph_success,
+        failure_callback: retained_graph_failure,
+        allow_stack_response: false,
+    };
+    let mut request = glide_core::graph_request::QueryRequest::new();
+    request.graph_name = "graph".into();
+    request.query = "RETURN 1".into();
+    let mut bytes = request.write_to_bytes().unwrap();
+    let expected = bytes.clone();
+    // SAFETY: adapter, name, context and input buffers remain live through
+    // submission. The deferred future must own clones, not these freed inputs.
+    unsafe {
+        let connection = create_client(
+            connection_request.as_ptr(),
+            connection_request.len(),
+            &client_type,
+            None,
+            None,
+            0,
+        );
+        let adapter = (*connection).conn_ptr;
+        free_connection_response(connection.cast_mut());
+        let mut context = ptr::null_mut();
+        assert!(
+            miri_tests::graph_context_create(adapter, b"graph".as_ptr(), 5, 0, 0, &mut context)
+                .is_null()
+        );
+        tokio::runtime::defer_next_spawn();
+        assert!(
+            miri_tests::graph_query_with_context(
+                adapter,
+                context,
+                7352,
+                bytes.as_ptr(),
+                bytes.len(),
+            )
+            .is_null()
+        );
+        bytes.fill(0);
+        drop(bytes);
+        miri_tests::graph_context_drop(context);
+        close_client(adapter);
+        assert!(GRAPH_COMPLETION.lock().unwrap().is_none());
+        tokio::runtime::complete_deferred_task();
+        assert_eq!(
+            GRAPH_COMPLETION.lock().unwrap().take(),
+            Some((7352, expected))
+        );
+    }
+}
+
+#[test]
 fn create_client_from_uri_test() {
     let uri = CString::new("redis://localhost:6378").unwrap();
     let client_type = Box::new(ClientType::SyncClient);
     let client_type_ptr = Box::into_raw(client_type);
 
     unsafe {
-        let connection_response_ptr =
-            create_client_from_uri(uri.as_ptr(), ptr::null(), client_type_ptr, Some(pubsub_callback));
+        let connection_response_ptr = create_client_from_uri(
+            uri.as_ptr(),
+            ptr::null(),
+            client_type_ptr,
+            Some(pubsub_callback),
+        );
         let conn_ptr = (*connection_response_ptr).conn_ptr;
         close_client(conn_ptr);
         free_connection_response(connection_response_ptr as *mut ConnectionResponse);

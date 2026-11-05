@@ -6,6 +6,43 @@ pub mod command_request;
 pub mod compression;
 pub mod connection_request;
 pub mod errors;
+pub mod graph {
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    pub struct GraphContext {
+        inner: Arc<(crate::client::Client, String, u32)>,
+    }
+
+    impl GraphContext {
+        pub fn new(
+            client: crate::client::Client,
+            name: String,
+            database: u32,
+        ) -> redis::RedisResult<Self> {
+            Ok(Self {
+                inner: Arc::new((client, name, database)),
+            })
+        }
+    }
+
+    pub async fn execute_request_with_context(
+        graph: GraphContext,
+        bytes: &[u8],
+    ) -> redis::RedisResult<redis::Value> {
+        let result = execute_request(graph.inner.0.clone(), bytes).await;
+        drop(graph);
+        result
+    }
+
+    pub async fn execute_request(
+        _client: crate::client::Client,
+        bytes: &[u8],
+    ) -> redis::RedisResult<redis::Value> {
+        Ok(redis::Value::BulkString(bytes.to_vec().into()))
+    }
+}
+pub use glide_core::graph_request;
 pub mod otel_db_semantics;
 pub mod pool;
 pub mod request_type;
