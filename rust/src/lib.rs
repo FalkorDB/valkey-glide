@@ -12,6 +12,7 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub mod executor;
+pub mod graph;
 pub mod pipeline;
 pub mod pipeline_options;
 pub mod routes;
@@ -74,6 +75,9 @@ pub use client::GlideClusterClient;
 pub use client::PipelineExt;
 pub use client::PubSubMessage;
 pub use client::PubSubMessageKind;
+pub use graph::Graph;
+#[cfg(feature = "sync")]
+pub use graph::SyncGraph;
 
 // Configuration types
 pub use config::BackoffStrategy;

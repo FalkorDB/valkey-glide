@@ -99,6 +99,17 @@ from glide_shared import (
     GlideClusterClientConfiguration,
     GlideCredentialProvider,
     GlideError,
+    GraphMap,
+    GraphNode,
+    GraphParameter,
+    GraphPath,
+    GraphPoint,
+    GraphQueryResult,
+    GraphRelationship,
+    GraphStatistics,
+    GraphTemporal,
+    GraphValue,
+    GraphVector,
     HashFieldConditionalChange,
     HybridFilterPolicy,
     IamAuthConfig,
@@ -205,6 +216,7 @@ from .async_commands import (
 )
 from .client_pool import AsyncClientPool, PoolConfig
 from .glide_client import GlideClient, GlideClusterClient, TGlideClient
+from .graph import Graph
 from .isolated_scope import AsyncIsolatedScope
 from .logger import Level as LogLevel
 from .logger import Logger
@@ -267,6 +279,18 @@ for old_name in _legacy_modules:
         sys.modules[old_name] = _LegacyModule(old_name)
 
 __all__ = [
+    "Graph",
+    "GraphMap",
+    "GraphNode",
+    "GraphParameter",
+    "GraphPath",
+    "GraphPoint",
+    "GraphQueryResult",
+    "GraphRelationship",
+    "GraphStatistics",
+    "GraphTemporal",
+    "GraphValue",
+    "GraphVector",
     # Client
     "TGlideClient",
     "GlideClient",

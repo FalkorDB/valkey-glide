@@ -8,6 +8,7 @@ Go provides native support for Examples which are a great way to document how to
 - [connection_management_commands_test.go](../connection_management_commands_test.go)
 - [generic_base_commands_test.go](../generic_base_commands_test.go)
 - [generic_commands_test.go](../generic_commands_test.go)
+- [graph_examples_test.go](../graph_examples_test.go) (local selection, no server required)
 - [hash_commands_test.go](../hash_commands_test.go)
 - [hyperloglog_commands_test.go](../hyperloglog_commands_test.go)
 - [list_commands_test.go](../list_commands_test.go)

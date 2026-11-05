@@ -1,6 +1,8 @@
 // Copyright Valkey GLIDE Project Contributors - SPDX Identifier: Apache-2.0
 
-pub use glide_core::client::{GlideRt, get_or_init_runtime};
+pub use glide_core::client::{
+    GlideRt, MIN_RUNTIME_STACK_SIZE, configured_thread_stack_size, get_or_init_runtime,
+};
 
 /// Mirrors glide_core::client::NodeAddress (internal type, not protobuf).
 pub struct NodeAddress {
@@ -41,6 +43,14 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn current_database(&self) -> u32 {
+        0
+    }
+
+    pub fn graph_database_epoch(&self) -> u64 {
+        0
+    }
+
     pub async fn new(
         _request: ConnectionRequest,
         push_sender: Option<tokio::sync::mpsc::UnboundedSender<PushInfo>>,

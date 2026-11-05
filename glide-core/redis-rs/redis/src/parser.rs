@@ -26,6 +26,10 @@ use combine::{
 use num_bigint::BigInt;
 
 const MAX_RECURSE_DEPTH: usize = 100;
+// Compact graph values add RESP aggregates around each logical list/map level.
+// The async scanner and builder are iterative, so this bound does not grow their call stacks.
+// Ordinary Value destruction still requires the supported native worker stack.
+const MAX_ASYNC_NESTING_DEPTH: usize = 512;
 
 fn err_parser(line: &str) -> ServerError {
     let mut pieces = line.splitn(2, ' ');
@@ -451,9 +455,7 @@ mod zero_copy {
                 return Ok(None);
             }
             let b = buf[pos];
-            // `depth` equals the recursion depth the old recursive
-            // scanner would have had (root entry counts as depth 1).
-            if matches!(b, b'*' | b'%' | b'|' | b'~' | b'>') && depth > MAX_RECURSE_DEPTH {
+            if matches!(b, b'*' | b'%' | b'|' | b'~' | b'>') && depth > MAX_ASYNC_NESTING_DEPTH {
                 return Err(parse_error("Maximum recursion depth exceeded".to_string()));
             }
             match b {
@@ -513,18 +515,132 @@ mod zero_copy {
         }
     }
 
-    /// Build a [`Value`] from a complete frame, slicing bulk-string payloads
-    /// out of `frame` with zero copies. `scan_value` must have validated the
-    /// frame is complete; bounds are still checked defensively.
-    pub(super) fn parse_value(frame: &Bytes, pos: &mut usize, depth: usize) -> RedisResult<Value> {
+    struct PendingAggregate {
+        value: Value,
+        remaining: usize,
+        key: Option<Value>,
+        push_kind_missing: bool,
+    }
+
+    impl PendingAggregate {
+        fn new(type_byte: u8, count: i64) -> RedisResult<Self> {
+            let remaining = child_count(type_byte, count)?;
+            let value = match type_byte {
+                b'*' => Value::Array(Vec::with_capacity(remaining)),
+                b'~' => Value::Set(Vec::with_capacity(remaining)),
+                b'%' => Value::Map(Vec::with_capacity(remaining / 2)),
+                b'|' => Value::Attribute {
+                    data: Box::new(Value::Nil),
+                    attributes: Vec::with_capacity(remaining / 2),
+                },
+                b'>' => Value::Push {
+                    kind: PushKind::Other(String::new()),
+                    data: Vec::with_capacity(remaining.saturating_sub(1)),
+                },
+                _ => unreachable!("aggregate type expected"),
+            };
+            Ok(Self {
+                value,
+                remaining,
+                key: None,
+                push_kind_missing: true,
+            })
+        }
+
+        fn append(&mut self, value: Value) -> RedisResult<()> {
+            self.remaining -= 1;
+            match &mut self.value {
+                Value::Array(items) | Value::Set(items) => items.push(value),
+                Value::Attribute { data, .. } if self.remaining == 0 => **data = value,
+                Value::Map(items)
+                | Value::Attribute {
+                    attributes: items, ..
+                } => {
+                    if let Some(key) = self.key.take() {
+                        items.push((key, value));
+                    } else {
+                        self.key = Some(value);
+                    }
+                }
+                Value::Push { kind, data } => {
+                    if self.push_kind_missing {
+                        let name = match value {
+                            Value::BulkString(name) => String::from_utf8(name.to_vec())
+                                .map_err(|e| parse_error(format!("invalid push kind: {e}")))?,
+                            Value::SimpleString(name) => name,
+                            _ => {
+                                return Err(parse_error(
+                                    "parse error when decoding push".to_string(),
+                                ))
+                            }
+                        };
+                        *kind = get_push_kind(name);
+                        self.push_kind_missing = false;
+                    } else {
+                        data.push(value);
+                    }
+                }
+                _ => unreachable!("aggregate value expected"),
+            }
+            Ok(())
+        }
+    }
+
+    /// Build a [`Value`] iteratively from a complete frame, retaining zero-copy
+    /// bulk-string slices without recursive parser call-stack growth.
+    pub(super) fn parse_value(frame: &Bytes, pos: &mut usize) -> RedisResult<Value> {
+        let mut aggregates: Vec<PendingAggregate> = Vec::new();
+        'next_value: loop {
+            let type_byte = *frame
+                .get(*pos)
+                .ok_or_else(|| parse_error("unexpected end of frame".to_string()))?;
+            let mut value = if matches!(type_byte, b'*' | b'%' | b'|' | b'~' | b'>') {
+                if aggregates.len() >= MAX_ASYNC_NESTING_DEPTH {
+                    return Err(parse_error("Maximum recursion depth exceeded".to_string()));
+                }
+                let (line_end, next) = find_line(frame, *pos + 1)
+                    .ok_or_else(|| parse_error("unexpected end of frame".to_string()))?;
+                let count = line_int(frame, *pos + 1, line_end)?;
+                *pos = next;
+                if count < 0 {
+                    if type_byte == b'>' {
+                        Value::Push {
+                            kind: PushKind::Other(String::new()),
+                            data: vec![],
+                        }
+                    } else {
+                        Value::Nil
+                    }
+                } else {
+                    let aggregate = PendingAggregate::new(type_byte, count)?;
+                    if aggregate.remaining != 0 {
+                        aggregates.push(aggregate);
+                        continue 'next_value;
+                    }
+                    aggregate.value
+                }
+            } else {
+                parse_leaf(frame, pos)?
+            };
+            loop {
+                let Some(parent) = aggregates.last_mut() else {
+                    return Ok(value);
+                };
+                parent.append(value)?;
+                if parent.remaining != 0 {
+                    continue 'next_value;
+                }
+                value = aggregates.pop().expect("completed aggregate").value;
+            }
+        }
+    }
+
+    fn parse_leaf(frame: &Bytes, pos: &mut usize) -> RedisResult<Value> {
         let buf = &frame[..];
         if *pos >= buf.len() {
             return Err(parse_error("unexpected end of frame".to_string()));
         }
         let b = buf[*pos];
-        if matches!(b, b'*' | b'%' | b'|' | b'~' | b'>') && depth > MAX_RECURSE_DEPTH {
-            return Err(parse_error("Maximum recursion depth exceeded".to_string()));
-        }
         let type_pos = *pos;
         match b {
             b'+' | b'-' | b':' | b'_' | b',' | b'#' | b'(' => {
@@ -599,87 +715,6 @@ mod zero_copy {
                                 "parse error when decoding verbatim string".to_string(),
                             ))
                         }
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            b'*' | b'%' | b'|' | b'~' | b'>' => {
-                let (line_end, next) = find_line(buf, type_pos + 1)
-                    .ok_or_else(|| parse_error("unexpected end of frame".to_string()))?;
-                let n = line_int(buf, type_pos + 1, line_end)?;
-                *pos = next;
-                if n < 0 {
-                    // Negative aggregate counts: `*-1`/`~-1` are RESP2 nil
-                    // arrays. The old parser mapped a negative push count to
-                    // an empty Push (same as `>0`), so preserve that; other
-                    // negative counts are treated as Nil (the old parser had
-                    // no sane behavior for them).
-                    return Ok(if b == b'>' {
-                        Value::Push {
-                            kind: PushKind::Other("".to_string()),
-                            data: vec![],
-                        }
-                    } else {
-                        Value::Nil
-                    });
-                }
-                match b {
-                    b'*' | b'~' => {
-                        let mut items = Vec::with_capacity(n as usize);
-                        for _ in 0..n {
-                            items.push(parse_value(frame, pos, depth + 1)?);
-                        }
-                        Ok(if b == b'*' {
-                            Value::Array(items)
-                        } else {
-                            Value::Set(items)
-                        })
-                    }
-                    b'%' => {
-                        let mut items = Vec::with_capacity(n as usize);
-                        for _ in 0..n {
-                            let k = parse_value(frame, pos, depth + 1)?;
-                            let v = parse_value(frame, pos, depth + 1)?;
-                            items.push((k, v));
-                        }
-                        Ok(Value::Map(items))
-                    }
-                    b'|' => {
-                        let mut attributes = Vec::with_capacity(n as usize);
-                        for _ in 0..n {
-                            let k = parse_value(frame, pos, depth + 1)?;
-                            let v = parse_value(frame, pos, depth + 1)?;
-                            attributes.push((k, v));
-                        }
-                        let data = Box::new(parse_value(frame, pos, depth + 1)?);
-                        Ok(Value::Attribute { data, attributes })
-                    }
-                    b'>' => {
-                        if n == 0 {
-                            return Ok(Value::Push {
-                                kind: PushKind::Other("".to_string()),
-                                data: vec![],
-                            });
-                        }
-                        let first = parse_value(frame, pos, depth + 1)?;
-                        let mut data = Vec::with_capacity(n as usize - 1);
-                        for _ in 1..n {
-                            data.push(parse_value(frame, pos, depth + 1)?);
-                        }
-                        let kind = match first {
-                            Value::BulkString(kind) => String::from_utf8(kind.to_vec())
-                                .map_err(|e| parse_error(format!("invalid push kind: {e}")))?,
-                            Value::SimpleString(kind) => kind,
-                            _ => {
-                                return Err(parse_error(
-                                    "parse error when decoding push".to_string(),
-                                ))
-                            }
-                        };
-                        Ok(Value::Push {
-                            kind: get_push_kind(kind),
-                            data,
-                        })
                     }
                     _ => unreachable!(),
                 }
@@ -760,7 +795,7 @@ mod aio_support {
                     let frame = crate::buf_pool::pooled_bytes_from_slice(&bytes[..end]);
                     bytes.advance(end);
                     let mut pos = 0;
-                    let value = super::zero_copy::parse_value(&frame, &mut pos, 1)?;
+                    let value = super::zero_copy::parse_value(&frame, &mut pos)?;
                     Ok(Some(Ok(value)))
                 }
             }
@@ -1164,16 +1199,16 @@ mod tests {
         }
     }
 
-    /// The zero-copy codec's iterative scanner must enforce the same
-    /// recursion-depth guard as the recursive sync parser.
+    /// All async aggregate types enforce the separate bounded iterative budget.
     #[cfg(feature = "aio")]
     #[test]
     fn test_codec_max_recursion_depth_all_aggregate_types() {
         use tokio_util::codec::Decoder;
         for agg in *b"*%|~>" {
             let mut codec = ValueCodec::default();
-            let mut bytes =
-                bytes::BytesMut::from(&nested_aggregate_headers(agg, MAX_RECURSE_DEPTH + 5)[..]);
+            let mut bytes = bytes::BytesMut::from(
+                &nested_aggregate_headers(agg, MAX_ASYNC_NESTING_DEPTH + 1)[..],
+            );
             let result = codec.decode(&mut bytes);
             let err = result.expect_err("expected recursion depth error");
             assert!(
@@ -1190,15 +1225,202 @@ mod tests {
         use tokio_util::codec::Decoder;
         for agg in *b"*~" {
             let mut codec = ValueCodec::default();
-            let mut bytes =
-                bytes::BytesMut::from(&nested_aggregate_headers(agg, MAX_RECURSE_DEPTH)[..]);
-            let result = codec.decode(&mut bytes);
-            assert!(
-                matches!(result, Ok(Some(Ok(_)))),
-                "aggregate {:?} within depth limit failed via codec: {result:?}",
-                agg as char
-            );
+            for depth in [MAX_ASYNC_NESTING_DEPTH - 1, MAX_ASYNC_NESTING_DEPTH] {
+                let mut bytes = bytes::BytesMut::from(&nested_aggregate_headers(agg, depth)[..]);
+                let result = codec.decode(&mut bytes);
+                assert!(
+                    matches!(result, Ok(Some(Ok(_)))),
+                    "aggregate {:?} within depth limit failed via codec: {result:?}",
+                    agg as char
+                );
+            }
         }
+    }
+
+    #[cfg(feature = "aio")]
+    #[test]
+    fn test_codec_graph_compact_depth() {
+        use tokio_util::codec::Decoder;
+
+        for map in [false, true] {
+            for depth in [60, 100, 128] {
+                let mut wire = b"*3\r\n*0\r\n*1\r\n*1\r\n".to_vec();
+                for _ in 0..depth {
+                    wire.extend_from_slice(if map {
+                        b"*2\r\n:10\r\n*2\r\n$1\r\nk\r\n"
+                    } else {
+                        b"*2\r\n:6\r\n*1\r\n"
+                    });
+                }
+                wire.extend_from_slice(b"*2\r\n:3\r\n:1\r\n*0\r\n");
+                let mut codec = ValueCodec::default();
+                let mut bytes = bytes::BytesMut::from(wire.as_slice());
+                let decoded = codec
+                    .decode(&mut bytes)
+                    .unwrap_or_else(|error| panic!("map={map}, depth={depth}: {error}"))
+                    .expect("complete compact frame")
+                    .expect("successful compact response");
+                assert!(bytes.is_empty());
+                let Value::Array(envelope) = &decoded else {
+                    panic!("expected response envelope");
+                };
+                let Value::Array(rows) = &envelope[1] else {
+                    panic!("expected rows");
+                };
+                let Value::Array(row) = &rows[0] else {
+                    panic!("expected row");
+                };
+                let mut value = &row[0];
+                for _ in 0..depth {
+                    let Value::Array(tagged) = value else {
+                        panic!("expected tagged value");
+                    };
+                    assert_eq!(tagged[0], Value::Int(if map { 10 } else { 6 }));
+                    let Value::Array(children) = &tagged[1] else {
+                        panic!("expected compact children");
+                    };
+                    value = &children[usize::from(map)];
+                }
+                assert_eq!(value, &Value::Array(vec![Value::Int(3), Value::Int(1)]));
+            }
+        }
+    }
+
+    #[cfg(feature = "aio")]
+    fn mixed_aggregate_wire(depth: usize) -> Vec<u8> {
+        let mut wire = Vec::new();
+        for level in 0..depth {
+            wire.extend_from_slice(match level % 5 {
+                0 => b"*1\r\n".as_slice(),
+                1 => b"%1\r\n+k\r\n".as_slice(),
+                2 => b"|1\r\n+k\r\n:1\r\n".as_slice(),
+                3 => b"~1\r\n".as_slice(),
+                _ => b">2\r\n+message\r\n".as_slice(),
+            });
+        }
+        wire.extend_from_slice(b":0\r\n");
+        wire
+    }
+
+    #[cfg(feature = "aio")]
+    #[test]
+    fn test_codec_builds_mixed_aggregates_on_a_small_stack() {
+        use tokio_util::codec::Decoder;
+
+        std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                let wire = mixed_aggregate_wire(MAX_ASYNC_NESTING_DEPTH);
+                let mut codec = ValueCodec::default();
+                let mut bytes = bytes::BytesMut::from(wire.as_slice());
+                let mut value = codec.decode(&mut bytes).unwrap().unwrap().unwrap();
+                assert!(bytes.is_empty());
+                // Construction-only test. Ordinary destruction requires the supported worker stack.
+                for depth in 0..MAX_ASYNC_NESTING_DEPTH {
+                    value = match (depth % 5, value) {
+                        (0, Value::Array(mut items)) | (3, Value::Set(mut items)) => {
+                            assert_eq!(items.len(), 1);
+                            items.pop().unwrap()
+                        }
+                        (1, Value::Map(mut items)) => {
+                            let (key, value) = items.pop().unwrap();
+                            assert_eq!(key, Value::SimpleString("k".into()));
+                            value
+                        }
+                        (2, Value::Attribute { data, attributes }) => {
+                            assert_eq!(
+                                attributes,
+                                vec![(Value::SimpleString("k".into()), Value::Int(1))]
+                            );
+                            *data
+                        }
+                        (4, Value::Push { kind, mut data }) => {
+                            assert_eq!(kind, PushKind::Message);
+                            data.pop().unwrap()
+                        }
+                        (_, value) => panic!("unexpected aggregate at depth {depth}: {value:?}"),
+                    };
+                }
+                assert_eq!(value, Value::Int(0));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(feature = "aio")]
+    #[test]
+    fn test_codec_decodes_and_drops_deep_values_on_a_standard_stack() {
+        use tokio_util::codec::Decoder;
+
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                for prefix in [
+                    b"*1\r\n".as_slice(),
+                    b"%1\r\n+k\r\n".as_slice(),
+                    b"|1\r\n+k\r\n:1\r\n".as_slice(),
+                    b"~1\r\n".as_slice(),
+                    b">2\r\n+message\r\n".as_slice(),
+                ] {
+                    let mut bytes = bytes::BytesMut::new();
+                    for _ in 0..MAX_ASYNC_NESTING_DEPTH {
+                        bytes.extend_from_slice(prefix);
+                    }
+                    bytes.extend_from_slice(b":0\r\n");
+                    let value = ValueCodec::default()
+                        .decode(&mut bytes)
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    assert!(bytes.is_empty());
+                    drop(value);
+                }
+                for depth in [MAX_ASYNC_NESTING_DEPTH - 1, MAX_ASYNC_NESTING_DEPTH] {
+                    let wire = mixed_aggregate_wire(depth);
+                    let mut codec = ValueCodec::default();
+                    let mut bytes = bytes::BytesMut::from(wire.as_slice());
+                    let value = codec.decode(&mut bytes).unwrap().unwrap().unwrap();
+                    assert!(bytes.is_empty());
+                    drop(value);
+                }
+                let mut codec = ValueCodec::default();
+                let mut bytes = bytes::BytesMut::from(
+                    mixed_aggregate_wire(MAX_ASYNC_NESTING_DEPTH + 1).as_slice(),
+                );
+                assert!(codec.decode(&mut bytes).is_err());
+                drop(codec);
+
+                for complete in [false, true] {
+                    let mut wire = b"*2\r\n".to_vec();
+                    wire.extend(mixed_aggregate_wire(MAX_ASYNC_NESTING_DEPTH - 1));
+                    if complete {
+                        wire.extend_from_slice(b",not-a-double\r\n");
+                        // The builder must clean up the completed deep sibling,
+                        // not merely reject incomplete/invalid framing.
+                        assert_eq!(
+                            super::zero_copy::scan_resume(
+                                &wire,
+                                &mut super::zero_copy::ScanState::default(),
+                            )
+                            .unwrap(),
+                            Some(wire.len())
+                        );
+                    }
+                    let mut codec = ValueCodec::default();
+                    let mut bytes = bytes::BytesMut::from(wire.as_slice());
+                    let decoded = codec.decode(&mut bytes);
+                    if complete {
+                        assert!(decoded.unwrap_err().to_string().contains("Expected double"));
+                    } else {
+                        assert!(decoded.unwrap().is_none());
+                    }
+                    drop(codec);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// Negative aggregate counts: `>-1` must decode like the old recursive

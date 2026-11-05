@@ -29,6 +29,7 @@ use std::sync::{Arc, OnceLock};
 
 mod address_resolver;
 mod errors;
+mod graph;
 mod iam_token_callback;
 mod jni_client;
 mod jni_pool;
@@ -1369,6 +1370,7 @@ pub extern "system" fn Java_glide_internal_GlideNativeBridge_closeClient(
 
         // DashMap operations are sync and lock-free
         if let Some((_, client)) = handle_table.remove(&handle_id) {
+            crate::graph::release_parent(handle_id);
             // Unregister from the scope client registry
             glide_core::scope::unregister_client(handle_id);
 

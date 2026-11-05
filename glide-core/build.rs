@@ -12,6 +12,7 @@ fn build_protobuf() {
         .input("src/protobuf/command_request.proto")
         .input("src/protobuf/response.proto")
         .input("src/protobuf/connection_request.proto")
+        .input("src/protobuf/graph_request.proto")
         .customize(customization_options)
         .run_from_script();
 }

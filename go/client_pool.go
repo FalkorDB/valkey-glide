@@ -268,9 +268,10 @@ func (p *ClientPool) GetClient(clientID int64) (*PooledClient, error) {
 	// always uses connReqBytes when present, so a config object here would never be read.
 	client := &Client{
 		baseClient: baseClient{
-			coreClient: unsafe.Pointer(adapterPtr),
-			pending:    make(map[uintptr]struct{}),
-			mu:         &sync.Mutex{},
+			graphUnsupported: true,
+			coreClient:       unsafe.Pointer(adapterPtr),
+			pending:          make(map[uintptr]struct{}),
+			mu:               &sync.Mutex{},
 		},
 		connReqBytes: p.connReq,
 	}

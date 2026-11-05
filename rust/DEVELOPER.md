@@ -78,6 +78,20 @@ cargo integration-tests  # integration tests
 cargo test               # all tests (unit, docs, and integration)
 ```
 
+### FalkorDB graph tests
+
+The dedicated `tests/graph.rs` target is separate from the plain-server `it_*`
+selector. Start the [pinned harness](../utils/falkordb_README.md), export its
+standalone/cluster endpoints, then run:
+
+```bash
+cargo test --test graph -- --include-ignored
+```
+
+It checks the same all-16-type dataset through async and blocking clients,
+standalone and cluster, and RESP2/RESP3. Selection-only coverage also runs without
+the module. Stop only the topology belonging to that harness state file.
+
 To run only some tests, pass a filter. A test runs if its full name (e.g.
 `value::from_valkey_value_tests::from_owned_valkey_value_array`) contains the filter:
 

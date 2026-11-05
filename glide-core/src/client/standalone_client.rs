@@ -1030,6 +1030,19 @@ impl StandaloneClient {
         Self::send_request(cmd, reconnecting_connection).await
     }
 
+    pub(super) async fn graph_connection(
+        &self,
+        readonly: bool,
+    ) -> RedisResult<super::GlideConnection> {
+        if self.inner.read_only && !readonly {
+            return Err(RedisError::from((
+                redis::ErrorKind::ReadOnly,
+                "write commands are not allowed in read-only mode",
+            )));
+        }
+        self.get_connection(readonly).await.get_connection().await
+    }
+
     pub async fn send_command(&mut self, cmd: &redis::Cmd) -> RedisResult<Value> {
         let Some(cmd_bytes) = Routable::command(cmd) else {
             return self.send_request_to_single_node(cmd, false).await;

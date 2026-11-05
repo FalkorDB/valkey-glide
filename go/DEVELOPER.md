@@ -153,6 +153,61 @@ Before starting this step, make sure you've installed all software requirements.
 
 We run our tests using Go's `testing` package. For convenience, we bundled test configuration and logging into makefile commands to simplify the process.
 
+#### FalkorDB graph tests
+
+`make graph-test` is separate from all ordinary Valkey/module targets. The
+`falkordb` build tag keeps server-backed graph tests out of `go test ./...`;
+untagged graph validation tests remain in the normal test packages.
+Start the digest-pinned `utils/falkordb_harness.py` harness, export its `host:port`
+endpoints as `FALKORDB_STANDALONE_ENDPOINT`, `FALKORDB_CLUSTER_ENDPOINT`, and
+`FALKORDB_REPLICA_ENDPOINT`, and run:
+
+```bash
+make generate-protobuf  # includes graph_request.proto; never edit generated Go
+make graph-test
+```
+
+Tests create unique graph keys and delete only their own graphs; they never
+globally flush databases. The suite covers typed parameters, every graph value
+kind, schema resolution, read-only errors, database selection epochs, closed
+parents, pooled-handle rejection, in-flight cancellation, and positive server
+timeouts followed by successful reads. Real Graph API tests round-trip list and
+map parameters at depths 60 and 100 through the FFI and reject depth 101 in Go
+validation (the root parameter map is depth zero). Expensive cancellation tests
+always use a bounded server timeout, and MONITOR verifies actual server dispatch.
+After cancellation, a successful recovery read is required within a bounded
+three-second interval rather than assuming late callbacks arrive after a sleep.
+The target also runs native ownership tests from the root package: garbage
+collection drops the Go handle's owned Rust context before a cancelled request's
+late callback, and dropping a context after its parent closes remains safe.
+The canonical all16 matrix explicitly tests standalone/cluster × RESP2/RESP3,
+using a test-only protobuf configuration wrapper through normal client creation;
+the public Go configuration has no protocol selector. Server `CLIENT INFO`
+confirms each negotiated protocol. Configured-replica tests cover RESP2 and RESP3
+with primary+replica addresses and `PreferReplica`: the shared Python MONITOR
+helper proves the query and all three schema reads used the same real replica
+connection, and `CLIENT LIST` confirms that connection's protocol. Primary
+fallback or missing replica evidence fails the test rather than counting as
+replica coverage.
+Use `CC=gcc GOFLAGS=-asan make graph-test` for Go/CGO AddressSanitizer coverage;
+the shared Rust library must be instrumented separately for Rust ASan coverage.
+
+Pure request-validation and canonical-result materialization tests can run
+without a native build. They also verify `graph-test` build tags and native
+library selection for amd64/arm64 × GNU/MUSL via Make dry runs and `go list`;
+this does not require cross-linking native libraries:
+
+```bash
+CGO_ENABLED=0 go test -count=1 -cover ./internal/graph
+```
+
+Local graph-selection examples need no server (`SelectGraph` performs no network
+I/O and the examples use lazy clients):
+
+```bash
+go test -count=1 . -run '^Example(Client|ClusterClient)_SelectGraph$'
+```
+
 #### Test Categories
 
 The Valkey GLIDE Go wrapper has three main categories of tests:
@@ -588,4 +643,3 @@ func (client *baseClient) CommandName(ctx context.Context, keys []string, ...) (
 **Commands following this pattern:**
 
 `Del`, `Exists`, `Unlink`, `Touch`, `MGet`, `PfCount`, `Migrate`, `SDiff`, `SInter`, `SUnion`, `ZDiff`, `Watch`
-

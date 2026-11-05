@@ -9,7 +9,9 @@ import glide.ffi.resolvers.NativeUtils;
 import java.lang.ref.PhantomReference;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -68,6 +70,20 @@ public class GlideCoreClient implements AutoCloseable {
             throw new RuntimeException("Failed to load native library", e);
         }
         onNativeInit();
+    }
+
+    static PhantomReference<Object> registerNativeCleanup(Object owner, Runnable action) {
+        PhantomReference<Object> reference = new PhantomReference<>(owner, CLEANUP_QUEUE);
+        CLEANUP_ACTIONS.put(reference, action);
+        return reference;
+    }
+
+    static void runNativeCleanup(PhantomReference<?> reference) {
+        Runnable action = CLEANUP_ACTIONS.remove(reference);
+        if (action != null) {
+            action.run();
+        }
+        reference.clear();
     }
 
     private static native void onNativeInit();
@@ -210,6 +226,82 @@ public class GlideCoreClient implements AutoCloseable {
     }
 
     // ==================== COMMAND EXECUTION METHODS ====================
+
+    /** Retain a selected Rust context locally, without connecting or issuing a command. */
+    public NativeGraphContext selectGraphContext(String name) {
+        long handle = nativeClientHandle.get();
+        if (handle == 0) {
+            throw new glide.api.models.exceptions.ClosingException("Client is closed");
+        }
+        return NativeGraphContext.select(this, handle, name);
+    }
+
+    /**
+     * Execute a graph-only protobuf request with normal backpressure, timeout, and close handling.
+     */
+    public CompletableFuture<Object> executeGraphQueryAsync(
+            NativeGraphContext context, byte[] request) {
+        CompletableFuture<Object> future = new CompletableFuture<>();
+        CompletableFuture<Void> cleanup = new CompletableFuture<>();
+        CompletableFuture<Object> completed = completionAfterCleanup(future, cleanup);
+        boolean registered = false;
+        try {
+            long handle = nativeClientHandle.get();
+            if (handle == 0) {
+                throw new glide.api.models.exceptions.ClosingException("Client is closed");
+            }
+            long correlationId =
+                    AsyncRegistry.register(
+                            future,
+                            maxInflightRequests,
+                            handle,
+                            inflightCounterKey,
+                            requestTimeoutMillis,
+                            cleanup);
+            registered = correlationId != 0;
+            if (registered) {
+                context.dispatch(this, handle, correlationId, request);
+            } else {
+                cleanup.complete(null);
+            }
+        } catch (Exception | LinkageError e) {
+            // AsyncRegistry's completion hook also cleans up a synchronous JNI dispatch failure.
+            future.completeExceptionally(e);
+            if (!registered) {
+                cleanup.complete(null);
+            }
+        }
+        return completed;
+    }
+
+    private static <T> CompletableFuture<T> completionAfterCleanup(
+            CompletableFuture<T> future, CompletableFuture<Void> cleanup) {
+        CompletableFuture<T> completed =
+                new CompletableFuture<T>() {
+                    @Override
+                    public boolean cancel(boolean mayInterruptIfRunning) {
+                        if (isDone() && !isCancelled()) {
+                            return false;
+                        }
+                        if (!future.cancel(mayInterruptIfRunning)) {
+                            return false;
+                        }
+                        // Concurrent cancellation must also wait for local cleanup, not native work.
+                        cleanup.join();
+                        return super.cancel(mayInterruptIfRunning);
+                    }
+                };
+        // The registered future is terminal before cleanup completes, so this join cannot wait on JNI.
+        cleanup.thenRun(
+                () -> {
+                    try {
+                        completed.complete(future.join());
+                    } catch (CancellationException | CompletionException error) {
+                        completed.completeExceptionally(error);
+                    }
+                });
+        return completed;
+    }
 
     /** Execute a batch of commands asynchronously via JNI. */
     public CompletableFuture<Object> executeBatchAsync(
@@ -413,44 +505,46 @@ public class GlideCoreClient implements AutoCloseable {
             boolean expectUtf8Response,
             long timeoutMs,
             long spanPtr) {
+        CompletableFuture<Object> future = new CompletableFuture<>();
+        CompletableFuture<Void> cleanup = new CompletableFuture<>();
+        CompletableFuture<Object> completed = completionAfterCleanup(future, cleanup);
+        boolean registered = false;
         try {
             long handle = nativeClientHandle.get();
             if (handle == 0) {
-                CompletableFuture<Object> future = new CompletableFuture<>();
-                future.completeExceptionally(
-                        new glide.api.models.exceptions.ClosingException("Client is closed"));
-                return future;
+                throw new glide.api.models.exceptions.ClosingException("Client is closed");
             }
 
-            CompletableFuture<Object> future = new CompletableFuture<>();
-            long correlationId;
-            try {
-                correlationId =
-                        AsyncRegistry.register(
-                                future, this.maxInflightRequests, handle, this.inflightCounterKey, timeoutMs);
-            } catch (glide.api.models.exceptions.RequestException e) {
-                future.completeExceptionally(e);
-                return future;
+            long correlationId =
+                    AsyncRegistry.register(
+                            future,
+                            this.maxInflightRequests,
+                            handle,
+                            this.inflightCounterKey,
+                            timeoutMs,
+                            cleanup);
+            registered = correlationId != 0;
+            if (registered) {
+                GlideNativeBridge.executeCommandAsync(
+                        handle,
+                        correlationId,
+                        requestType,
+                        args != null ? args : EMPTY_2D_BYTE_ARRAY,
+                        hasRoute,
+                        routeType,
+                        routeParam,
+                        expectUtf8Response,
+                        spanPtr);
+            } else {
+                cleanup.complete(null);
             }
-
-            GlideNativeBridge.executeCommandAsync(
-                    handle,
-                    correlationId,
-                    requestType,
-                    args != null ? args : EMPTY_2D_BYTE_ARRAY,
-                    hasRoute,
-                    routeType,
-                    routeParam,
-                    expectUtf8Response,
-                    spanPtr);
-
-            return future;
-
-        } catch (Exception e) {
-            CompletableFuture<Object> future = new CompletableFuture<>();
+        } catch (Exception | LinkageError e) {
             future.completeExceptionally(e);
-            return future;
+            if (!registered) {
+                cleanup.complete(null);
+            }
         }
+        return completed;
     }
 
     /** Execute a script asynchronously via JNI. */

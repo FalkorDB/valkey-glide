@@ -124,6 +124,17 @@ Before starting this step, make sure you've installed all software requirments.
 
         # Run only server module tests (requires valkey modules)
         npm run test:modules
+
+        # Local typed graph transport/model tests (build first for native declarations and protobuf)
+        npm run test:graph-unit
+
+        # Graph callback and lifetime regression tests (requires the native build)
+        npm run test:graph-native
+
+        # Dedicated FalkorDB v6.0.3 conformance (never part of plain-Valkey suites)
+        # Set FALKORDB_STANDALONE_ENDPOINT, FALKORDB_REPLICA_ENDPOINT and
+        # FALKORDB_CLUSTER_ENDPOINT to host:port.
+        npm run test:graph
         ```
 
 5. Integrating the built GLIDE package into your project:

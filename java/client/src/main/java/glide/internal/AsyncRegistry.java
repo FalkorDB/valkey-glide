@@ -184,6 +184,17 @@ public final class AsyncRegistry {
             long clientHandle,
             long counterKey,
             long timeoutMillis) {
+        return register(future, maxInflightRequests, clientHandle, counterKey, timeoutMillis, null);
+    }
+
+    /** Graph dispatch waits for this barrier before exposing completion to dependent requests. */
+    static <T> long register(
+            CompletableFuture<T> future,
+            int maxInflightRequests,
+            long clientHandle,
+            long counterKey,
+            long timeoutMillis,
+            CompletableFuture<Void> cleanupBarrier) {
         if (future == null) {
             throw new IllegalArgumentException("Future cannot be null");
         }
@@ -232,7 +243,11 @@ public final class AsyncRegistry {
 
         // Set up cleanup on the original future
         // This ensures proper resource cleanup when completed
-        setupCleanup(correlationId, originalFuture, maxInflightRequests, counterKey);
+        CompletableFuture<Object> cleaned =
+                setupCleanup(correlationId, originalFuture, maxInflightRequests, counterKey);
+        if (cleanupBarrier != null) {
+            cleaned.whenComplete((result, error) -> cleanupBarrier.complete(null));
+        }
 
         return correlationId;
     }
@@ -274,12 +289,12 @@ public final class AsyncRegistry {
      * Set up cleanup handler for when the future completes (success, error, or timeout). Performs
      * atomic cleanup to avoid races and leaks.
      */
-    private static void setupCleanup(
+    private static CompletableFuture<Object> setupCleanup(
             long correlationId,
             CompletableFuture<Object> future,
             int maxInflightRequests,
             long clientHandle) {
-        future.whenComplete(
+        return future.whenComplete(
                 (result, error) -> {
                     // Atomic cleanup - no race conditions
                     activeFutures.remove(correlationId);

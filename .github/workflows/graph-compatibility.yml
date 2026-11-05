@@ -1,0 +1,251 @@
+name: FalkorDB graph compatibility
+
+permissions:
+    contents: read
+
+on:
+    pull_request:
+        paths:
+            - "utils/falkordb*"
+            - "glide-core/**"
+            - "glide-logger/**"
+            - "glide-telemetry/**"
+            - "ffi/**"
+            - "rust/**"
+            - "go/**"
+            - "node/**"
+            - "java/**"
+            - "python/**"
+            - ".github/actions/install-*/**"
+            - ".github/workflows/build-python-wrapper/**"
+            - ".github/workflows/graph-compatibility.yml"
+    push:
+        branches:
+            - main
+        paths:
+            - "utils/falkordb*"
+            - "glide-core/**"
+            - "glide-logger/**"
+            - "glide-telemetry/**"
+            - "ffi/**"
+            - "rust/**"
+            - "go/**"
+            - "node/**"
+            - "java/**"
+            - "python/**"
+            - ".github/actions/install-*/**"
+            - ".github/workflows/build-python-wrapper/**"
+            - ".github/workflows/graph-compatibility.yml"
+    workflow_dispatch:
+
+concurrency:
+    group: graph-compatibility-${{ github.ref }}
+    cancel-in-progress: true
+
+defaults:
+    run:
+        shell: bash
+
+env:
+    CARGO_BUILD_JOBS: "2"
+    CARGO_INCREMENTAL: "0"
+    CARGO_PROFILE_DEV_DEBUG: "0"
+    CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+    wire-compatibility:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 15
+        env:
+            HARNESS_STATE: .build/falkordb-wire-${{ github.run_id }}-${{ github.run_attempt }}.json
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+            - name: Recorder, fixture and replica monitor safety tests
+              run: python3 -m unittest discover -s utils -p falkordb_tests.py -v
+            - name: Verify Docker access
+              run: docker info --format '{{.ServerVersion}}'
+            - name: Replay pinned RESP2/RESP3 fixtures and topology assertions
+              run: python3 utils/falkordb_tests.py --topology all --state "$HARNESS_STATE"
+            - name: Exact per-run cleanup, including interrupted tests
+              if: always()
+              run: python3 utils/falkordb_harness.py stop --state "$HARNESS_STATE"
+
+    api-compatibility:
+        name: Graph APIs (${{ matrix.binding }})
+        needs: wire-compatibility
+        runs-on: ubuntu-24.04
+        timeout-minutes: ${{ matrix.binding == 'python' && 90 || 45 }}
+        strategy:
+            fail-fast: false
+            matrix:
+                binding: [rust, go, node, java, python]
+        env:
+            HARNESS_STATE: .build/falkordb-${{ matrix.binding }}-${{ github.run_id }}-${{ github.run_attempt }}.json
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  persist-credentials: false
+
+            - name: Determine native Rust client's supported toolchain
+              if: matrix.binding == 'rust'
+              id: msrv
+              working-directory: rust
+              run: |
+                  msrv=$(awk -F'"' '/^rust-version/ { print $2; exit }' Cargo.toml)
+                  test -n "$msrv"
+                  echo "toolchain=$msrv" >> "$GITHUB_OUTPUT"
+
+            - name: Set up Go
+              if: matrix.binding == 'go'
+              uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+              with:
+                  go-version: "1.22"
+                  cache-dependency-path: go/go.sum
+
+            - name: Set up Node
+              if: matrix.binding == 'node'
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+              with:
+                  node-version: "26.x"
+
+            - name: Validate Gradle wrapper
+              if: matrix.binding == 'java'
+              uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+            - name: Install Java compilation toolchain
+              if: matrix.binding == 'java'
+              uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+              with:
+                  distribution: temurin
+                  java-version: "11"
+
+            - name: Set up Java test runtime
+              if: matrix.binding == 'java'
+              uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+              with:
+                  distribution: temurin
+                  java-version: "17"
+
+            - name: Set up Python
+              if: matrix.binding == 'python'
+              uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+              with:
+                  python-version: "3.13"
+
+            - name: Install existing shared build prerequisites
+              if: matrix.binding != 'python'
+              uses: ./.github/actions/install-shared-dependencies
+              with:
+                  os: ubuntu
+                  target: x86_64-unknown-linux-gnu
+                  rust-toolchain: ${{ steps.msrv.outputs.toolchain || 'stable' }}
+                  language: ${{ matrix.binding }}
+                  engine-version: ${{ matrix.binding == 'rust' && '8.1' || '' }}
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Install Java's required protobuf compiler
+              if: matrix.binding == 'java'
+              uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
+              with:
+                  version: "29.1"
+                  repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Cache native build dependencies
+              uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: |
+                      glide-core/target
+                      rust/target
+                      ffi/target
+                      node/rust-client/target
+                      java/target
+                      python/target
+                  key: graph-${{ runner.os }}-${{ matrix.binding }}-${{ hashFiles('glide-core/Cargo.lock', 'rust/Cargo.lock', 'ffi/Cargo.lock', 'node/rust-client/Cargo.lock', 'java/Cargo.lock', 'python/glide-async/Cargo.lock') }}
+                  restore-keys: |
+                      graph-${{ runner.os }}-${{ matrix.binding }}-
+
+            - name: Cache Gradle dependencies
+              if: matrix.binding == 'java'
+              uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: |
+                      ~/.gradle/caches
+                      ~/.gradle/wrapper
+                  key: graph-${{ runner.os }}-gradle-${{ hashFiles('java/**/*.gradle*', 'java/**/gradle-wrapper.properties') }}
+                  restore-keys: |
+                      graph-${{ runner.os }}-gradle-
+
+            - name: Build Go FFI and generated bindings
+              if: matrix.binding == 'go'
+              working-directory: go
+              run: make install-tools build
+
+            - name: Build Node native addon and TypeScript
+              if: matrix.binding == 'node'
+              working-directory: node
+              run: |
+                  npm ci
+                  npm run build:release
+
+            - name: Build both Python clients using existing build action
+              if: matrix.binding == 'python'
+              uses: ./.github/workflows/build-python-wrapper
+              env:
+                  CARGO_TARGET_DIR: ${{ github.workspace }}/python/target
+              with:
+                  os: ubuntu
+                  target: x86_64-unknown-linux-gnu
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Start this job's pinned topology and export reachable endpoints
+              run: |
+                  python3 utils/falkordb_harness.py start --topology all \
+                      --state "$HARNESS_STATE" --format env |
+                      sed 's/^export //' >> "$GITHUB_ENV"
+
+            - name: Core decoder, safety and actual topology conformance
+              if: matrix.binding == 'rust'
+              env:
+                  FALKORDB_TEST_FAILOVER: "1"
+              run: |
+                  cargo test --manifest-path glide-core/Cargo.toml \
+                      --features proto,socket-layer,standalone_heartbeat --lib graph::
+                  cargo test --manifest-path glide-core/Cargo.toml \
+                      --features proto,socket-layer,standalone_heartbeat --test test_graph
+                  cargo test --manifest-path glide-core/Cargo.toml \
+                      --features proto,socket-layer,standalone_heartbeat --test test_graph_topology \
+                      -- --ignored --test-threads=1
+
+            - name: Native Rust graph API, including async and blocking live tests
+              if: matrix.binding == 'rust'
+              run: |
+                  cargo test --manifest-path rust/Cargo.toml --test graph \
+                      -- --include-ignored --test-threads=1
+
+            - name: Go graph API conformance
+              if: matrix.binding == 'go'
+              run: make -C go graph-test
+
+            - name: Node graph unit, native bridge and live API conformance
+              if: matrix.binding == 'node'
+              working-directory: node
+              run: |
+                  npm run test:graph-unit
+                  npm run test:graph-native
+                  npm run test:graph
+
+            - name: Java graph API conformance with isolated server lifecycle
+              if: matrix.binding == 'java'
+              working-directory: java
+              env:
+                  GLIDE_DOCKER_SERVERS: "true"
+              run: ./gradlew --build-cache :client:graphTest --max-workers=2
+
+            - name: Python sync and async graph API conformance
+              if: matrix.binding == 'python'
+              working-directory: python
+              run: .env/bin/python -m pytest -o addopts= graph_tests
+
+            - name: Exact cleanup of only this matrix job's topology
+              if: always()
+              run: python3 utils/falkordb_harness.py stop --state "$HARNESS_STATE"
