@@ -90,6 +90,17 @@ impl GraphContext {
         readonly: bool,
     ) -> RedisResult<GraphQueryResult> {
         let deadline = tokio::time::Instant::now() + self.inner.client.get_request_timeout();
+        self.execute_with_deadline(query, options, readonly, deadline)
+            .await
+    }
+
+    async fn execute_with_deadline(
+        &self,
+        query: &str,
+        options: &GraphQueryOptions,
+        readonly: bool,
+        deadline: tokio::time::Instant,
+    ) -> RedisResult<GraphQueryResult> {
         let query = params::serialize_query(query, options)?;
         if !self.database_matches() {
             return Err(database_changed());
@@ -185,4 +196,56 @@ fn database_changed() -> RedisError {
         ErrorKind::ClientError,
         "Graph handle's selected database changed; select a new graph handle",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::{ConnectionRequest, NodeAddress};
+    use std::time::Duration;
+
+    async fn lazy_graph() -> GraphContext {
+        let client = Client::new(
+            ConnectionRequest {
+                addresses: vec![NodeAddress {
+                    host: "127.0.0.1".into(),
+                    port: 1,
+                    unix_socket_path: None,
+                }],
+                lazy_connect: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        GraphContext::new(client, "local".into(), 0).unwrap()
+    }
+
+    #[tokio::test]
+    async fn expired_adaptation_budget_is_not_reset_before_query() {
+        let graph = lazy_graph().await;
+        let error = graph
+            .execute_with_deadline(
+                "RETURN 42",
+                &GraphQueryOptions::default(),
+                false,
+                tokio::time::Instant::now() - Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.is_timeout(), "{error}");
+    }
+
+    #[tokio::test]
+    async fn clones_share_context_until_the_final_owner_is_dropped() {
+        let graph = lazy_graph().await;
+        let clone = graph.clone();
+        assert!(Arc::ptr_eq(&graph.inner, &clone.inner));
+        let released = Arc::downgrade(&graph.inner);
+        drop(graph);
+        assert_eq!(released.strong_count(), 1);
+        drop(clone);
+        assert!(released.upgrade().is_none());
+    }
 }

@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 /// Execute the graph-only byte bridge, preserving int64 values in protobuf.
 pub async fn execute_request(client: Client, bytes: &[u8]) -> RedisResult<Value> {
+    let deadline = tokio::time::Instant::now() + client.get_request_timeout();
     let request = parse_request(bytes)?;
     if client.graph_database_epoch() != request.database_epoch {
         return Err(invalid(
@@ -16,7 +17,7 @@ pub async fn execute_request(client: Client, bytes: &[u8]) -> RedisResult<Value>
         ));
     }
     let graph = GraphContext::new(client, request.graph_name.to_string(), request.database)?;
-    execute(graph, request).await
+    execute(graph, request, deadline).await
 }
 
 /// Execute a byte request using a previously selected, shared native context.
@@ -24,6 +25,7 @@ pub async fn execute_request(client: Client, bytes: &[u8]) -> RedisResult<Value>
 /// The request identity must match the immutable selection; it cannot redirect a
 /// retained handle to another graph or database.
 pub async fn execute_request_with_context(graph: GraphContext, bytes: &[u8]) -> RedisResult<Value> {
+    let deadline = tokio::time::Instant::now() + graph.inner.client.get_request_timeout();
     let request = parse_request(bytes)?;
     if request.graph_name.as_bytes() != graph.name().as_bytes()
         || request.database != graph.inner.database
@@ -33,7 +35,7 @@ pub async fn execute_request_with_context(graph: GraphContext, bytes: &[u8]) -> 
             "Graph request does not match the selected graph context".into(),
         ));
     }
-    execute(graph, request).await
+    execute(graph, request, deadline).await
 }
 
 fn parse_request(bytes: &[u8]) -> RedisResult<QueryRequest> {
@@ -41,16 +43,18 @@ fn parse_request(bytes: &[u8]) -> RedisResult<QueryRequest> {
         .map_err(|error| invalid(format!("Invalid graph request: {error}")))
 }
 
-async fn execute(graph: GraphContext, request: QueryRequest) -> RedisResult<Value> {
+async fn execute(
+    graph: GraphContext,
+    request: QueryRequest,
+    deadline: tokio::time::Instant,
+) -> RedisResult<Value> {
     let options = GraphQueryOptions {
         parameters: convert_map(request.parameters.as_ref(), 0)?,
         timeout_ms: request.timeout_ms,
     };
-    let result = if request.readonly {
-        graph.ro_query(&request.query, &options).await
-    } else {
-        graph.query(&request.query, &options).await
-    }?;
+    let result = graph
+        .execute_with_deadline(&request.query, &options, request.readonly, deadline)
+        .await?;
     bridge::encode_result(result)
 }
 
