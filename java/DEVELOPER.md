@@ -404,6 +404,16 @@ one-slot entity tests keep that graph transport coverage separate from ordinary 
 Ordinary commands used for graph setup and teardown also complete only after registry cleanup.
 The lifetime tests check that boundary directly on successful `DEL` and rejected ordinary `GET`
 commands; entity teardown chains `DEL` to `EXISTS` with one inflight slot without an intermediate wait.
+Cancelling the future returned by either core transport forwards cancellation to its registered
+future, cancels its Java timeout task, and releases its Java inflight slot before exposing cancellation.
+This does not abort native/server work or make arbitrary derived `CompletableFuture` stages forward
+cancellation. Native operations and admission limits may remain active until native completion.
+Cancellation regressions cover zero/nonzero Java timeouts, late native callbacks,
+one-slot admission, and cleanup ordering on success, error, and cancellation.
+Live cancellation cases use real JNI dispatch under both protocols/topologies with one Java slot and
+zero Java timeout, independently of native admission. Owned blocking commands are explicitly released
+and verified consumed. A suite-scoped owned client prevents correlation-ID reuse while late native
+callbacks may arrive; it closes after all test containers finish.
 Graph names, query text, parameter strings, and map keys share strict Unicode validation before
 JNI/protobuf encoding. Unit tests reject unpaired high/low surrogates before selection or submission;
 live query and read-only tests preserve supplementary characters in graph names and query literals.
@@ -420,7 +430,9 @@ export GLIDE_DOCKER_SERVERS=true
 # Fast Java-only graph unit tests. The ordinary task excludes tagged live graph tests.
 ./gradlew :client:test --tests 'glide.api.GraphTest' \
   --tests 'glide.api.models.graph.GraphQueryOptionsTest' \
-  --tests 'glide.internal.GraphResponseMapperTest'
+  --tests 'glide.internal.GraphResponseMapperTest' \
+  --tests 'glide.internal.NativeGraphContextTest' \
+  --tests 'glide.internal.GlideCoreClientCancellationTest'
 ```
 
 The unit tests cover serialization and canonical-result materialization without a server.

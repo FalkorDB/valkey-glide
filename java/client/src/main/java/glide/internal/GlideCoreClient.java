@@ -9,7 +9,9 @@ import glide.ffi.resolvers.NativeUtils;
 import java.lang.ref.PhantomReference;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -241,8 +243,7 @@ public class GlideCoreClient implements AutoCloseable {
             NativeGraphContext context, byte[] request) {
         CompletableFuture<Object> future = new CompletableFuture<>();
         CompletableFuture<Void> cleanup = new CompletableFuture<>();
-        // CompletableFuture dependents run LIFO. Expose completion only after registry cleanup.
-        CompletableFuture<Object> completed = cleanup.thenCompose(ignored -> future);
+        CompletableFuture<Object> completed = completionAfterCleanup(future, cleanup);
         boolean registered = false;
         try {
             long handle = nativeClientHandle.get();
@@ -270,6 +271,35 @@ public class GlideCoreClient implements AutoCloseable {
                 cleanup.complete(null);
             }
         }
+        return completed;
+    }
+
+    private static <T> CompletableFuture<T> completionAfterCleanup(
+            CompletableFuture<T> future, CompletableFuture<Void> cleanup) {
+        CompletableFuture<T> completed =
+                new CompletableFuture<T>() {
+                    @Override
+                    public boolean cancel(boolean mayInterruptIfRunning) {
+                        if (isDone() && !isCancelled()) {
+                            return false;
+                        }
+                        if (!future.cancel(mayInterruptIfRunning)) {
+                            return false;
+                        }
+                        // Concurrent cancellation must also wait for local cleanup, not native work.
+                        cleanup.join();
+                        return super.cancel(mayInterruptIfRunning);
+                    }
+                };
+        // The registered future is terminal before cleanup completes, so this join cannot wait on JNI.
+        cleanup.thenRun(
+                () -> {
+                    try {
+                        completed.complete(future.join());
+                    } catch (CancellationException | CompletionException error) {
+                        completed.completeExceptionally(error);
+                    }
+                });
         return completed;
     }
 
@@ -477,8 +507,7 @@ public class GlideCoreClient implements AutoCloseable {
             long spanPtr) {
         CompletableFuture<Object> future = new CompletableFuture<>();
         CompletableFuture<Void> cleanup = new CompletableFuture<>();
-        // Ordinary commands used around graph queries must expose completion after cleanup, too.
-        CompletableFuture<Object> completed = cleanup.thenCompose(ignored -> future);
+        CompletableFuture<Object> completed = completionAfterCleanup(future, cleanup);
         boolean registered = false;
         try {
             long handle = nativeClientHandle.get();
