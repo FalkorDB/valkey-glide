@@ -7,16 +7,174 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import graph_request.GraphRequest.Parameter;
 import java.math.BigInteger;
+import java.util.AbstractSequentialList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class GraphQueryOptionsTest {
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 4096})
+    void sequential_lists_are_encoded_in_one_pass_without_indexed_access(int size) {
+        List<Object> expected = new ArrayList<>();
+        for (int i = 0; i < size; i++) {
+            expected.add((long) i);
+        }
+        SequentialValues values = new SequentialValues(expected);
+        GraphQueryOptions actual =
+                GraphQueryOptions.builder().params(Collections.singletonMap("items", values)).build();
+        assertEquals(
+                GraphQueryOptions.builder()
+                        .params(Collections.singletonMap("items", expected))
+                        .build()
+                        .toProtobuf(),
+                actual.toProtobuf());
+        assertEquals(1, values.iteratorStarts);
+        assertEquals(size, values.nextCalls);
+    }
+
+    @Test
+    void sequential_lists_preserve_mixed_nested_values_and_snapshot_output() {
+        List<Object> nested = Arrays.asList(null, true, "λ🌐", Long.MIN_VALUE, Long.MAX_VALUE, 1.5);
+        List<Object> expected = Arrays.asList(7L, nested, Collections.singletonMap("field", nested));
+        SequentialValues values =
+                new SequentialValues(
+                        Arrays.asList(
+                                7L,
+                                new SequentialValues(nested),
+                                Collections.singletonMap("field", new SequentialValues(nested))));
+        GraphQueryOptions actual =
+                GraphQueryOptions.builder().params(Collections.singletonMap("items", values)).build();
+        assertEquals(
+                GraphQueryOptions.builder()
+                        .params(Collections.singletonMap("items", expected))
+                        .build()
+                        .toProtobuf(),
+                actual.toProtobuf());
+        values.clear();
+        assertEquals(3, actual.toProtobuf().getEntries(0).getValue().getListValue().getValuesCount());
+    }
+
+    @Test
+    void sequential_list_errors_keep_indexed_paths_and_cycle_detection() {
+        List<Object> invalid = Arrays.asList("ok", Arrays.asList(1L, 2L, new Date(0)));
+        IllegalArgumentException expected =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () ->
+                                GraphQueryOptions.builder()
+                                        .params(Collections.singletonMap("items", invalid))
+                                        .build());
+        IllegalArgumentException actual =
+                assertThrows(
+                        IllegalArgumentException.class,
+                        () ->
+                                GraphQueryOptions.builder()
+                                        .params(
+                                                Collections.singletonMap(
+                                                        "items",
+                                                        new SequentialValues(
+                                                                Arrays.asList(
+                                                                        "ok", new SequentialValues((List<?>) invalid.get(1))))))
+                                        .build());
+        assertEquals(expected.getMessage(), actual.getMessage());
+        assertEquals("params.items[1][2]: unsupported type java.util.Date", actual.getMessage());
+        SequentialValues cycle = new SequentialValues(Collections.emptyList());
+        cycle.add(cycle);
+        assertEquals(
+                "params.items[0]: cyclic parameter",
+                assertThrows(
+                                IllegalArgumentException.class,
+                                () ->
+                                        GraphQueryOptions.builder()
+                                                .params(Collections.singletonMap("items", cycle))
+                                                .build())
+                        .getMessage());
+    }
+
+    private static final class SequentialValues extends AbstractSequentialList<Object> {
+        private final LinkedList<Object> values;
+        private int iteratorStarts;
+        private int nextCalls;
+
+        private SequentialValues(List<?> values) {
+            this.values = new LinkedList<>(values);
+        }
+
+        @Override
+        public Object get(int index) {
+            throw new AssertionError("Indexed sequential-list access at " + index);
+        }
+
+        @Override
+        public int size() {
+            return values.size();
+        }
+
+        @Override
+        public ListIterator<Object> listIterator(int index) {
+            assertEquals(0, index, "Encoding must start one forward traversal");
+            iteratorStarts++;
+            ListIterator<Object> iterator = values.listIterator(index);
+            return new ListIterator<Object>() {
+                @Override
+                public boolean hasNext() {
+                    return iterator.hasNext();
+                }
+
+                @Override
+                public Object next() {
+                    nextCalls++;
+                    return iterator.next();
+                }
+
+                @Override
+                public boolean hasPrevious() {
+                    return iterator.hasPrevious();
+                }
+
+                @Override
+                public Object previous() {
+                    return iterator.previous();
+                }
+
+                @Override
+                public int nextIndex() {
+                    return iterator.nextIndex();
+                }
+
+                @Override
+                public int previousIndex() {
+                    return iterator.previousIndex();
+                }
+
+                @Override
+                public void remove() {
+                    iterator.remove();
+                }
+
+                @Override
+                public void set(Object value) {
+                    iterator.set(value);
+                }
+
+                @Override
+                public void add(Object value) {
+                    iterator.add(value);
+                }
+            };
+        }
+    }
+
     @Test
     void typed_parameters_are_exact_and_snapshotted() {
         Map<String, Object> parameters = new LinkedHashMap<>();

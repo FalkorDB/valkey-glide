@@ -84,9 +84,10 @@ public final class GraphQueryOptions {
             enter(value, path, active, depth);
             try {
                 ParameterList.Builder list = ParameterList.newBuilder();
-                List<?> values = (List<?>) value;
-                for (int i = 0; i < values.size(); i++) {
-                    list.addValues(encode(values.get(i), path + "[" + i + "]", active, depth + 1));
+                int index = 0;
+                for (Object element : (List<?>) value) {
+                    list.addValues(encode(element, path + "[" + index + "]", active, depth + 1));
+                    index++;
                 }
                 return result.setListValue(list).build();
             } finally {

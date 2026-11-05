@@ -68,7 +68,12 @@ public final class NativeGraphContext implements AutoCloseable {
     /** Release the internal selection; already-dispatched operations own independent Arc clones. */
     @Override
     public void close() {
-        GlideCoreClient.runNativeCleanup(cleanup);
+        try {
+            GlideCoreClient.runNativeCleanup(cleanup);
+        } finally {
+            // Another closer may have claimed the action without invalidating the selection yet.
+            state.run();
+        }
     }
 
     private static final class State implements Runnable {

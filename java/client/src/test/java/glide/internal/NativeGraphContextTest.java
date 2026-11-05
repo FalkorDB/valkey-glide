@@ -16,10 +16,16 @@ import static org.mockito.Mockito.mock;
 import glide.api.models.exceptions.ClosingException;
 import glide.api.models.exceptions.RequestException;
 import java.lang.ref.PhantomReference;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
@@ -27,6 +33,71 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class NativeGraphContextTest {
+    @Test
+    void every_close_waits_for_invalidation_when_another_closer_has_claimed_cleanup()
+            throws Exception {
+        AsyncRegistry.reset();
+        try (GlideCoreClient owner = new GlideCoreClient(Long.MAX_VALUE - 301, 1, 0)) {
+            Constructor<NativeGraphContext> constructor =
+                    NativeGraphContext.class.getDeclaredConstructor(
+                            GlideCoreClient.class, String.class, long[].class);
+            constructor.setAccessible(true);
+            NativeGraphContext context =
+                    constructor.newInstance(owner, "close-race", new long[] {Long.MAX_VALUE - 302, 0, 0});
+            Field stateField = NativeGraphContext.class.getDeclaredField("state");
+            stateField.setAccessible(true);
+            Object state = stateField.get(context);
+            Field cleanupField = NativeGraphContext.class.getDeclaredField("cleanup");
+            cleanupField.setAccessible(true);
+            Object cleanup = cleanupField.get(context);
+            Field actionsField = GlideCoreClient.class.getDeclaredField("CLEANUP_ACTIONS");
+            actionsField.setAccessible(true);
+            Map<?, ?> actions = (Map<?, ?>) actionsField.get(null);
+            ExecutorService executor = Executors.newFixedThreadPool(2);
+            try {
+                CompletableFuture<Void> first;
+                CompletableFuture<Void> second;
+                synchronized (state) {
+                    first = CompletableFuture.runAsync(context::close, executor);
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (actions.containsKey(cleanup)) {
+                        assertTrue(System.nanoTime() < deadline, "First closer never claimed cleanup");
+                        Thread.yield();
+                    }
+                    assertFalse(first.isDone(), "The first closer must be blocked before invalidation");
+                    CountDownLatch secondEntered = new CountDownLatch(1);
+                    second =
+                            CompletableFuture.runAsync(
+                                    () -> {
+                                        secondEntered.countDown();
+                                        context.close();
+                                    },
+                                    executor);
+                    assertTrue(secondEntered.await(5, TimeUnit.SECONDS));
+                    assertThrows(TimeoutException.class, () -> second.get(100, TimeUnit.MILLISECONDS));
+                }
+                first.get(5, TimeUnit.SECONDS);
+                second.get(5, TimeUnit.SECONDS);
+                ClosingException closed =
+                        assertThrows(
+                                ClosingException.class,
+                                () -> context.dispatch(owner, owner.getNativeHandle(), 1, new byte[0]));
+                assertEquals("Graph context is released", closed.getMessage());
+                assertInstanceOf(
+                        ClosingException.class,
+                        assertThrows(
+                                        CompletionException.class,
+                                        () -> owner.executeGraphQueryAsync(context, new byte[0]).join())
+                                .getCause());
+                assertEquals(0, AsyncRegistry.getPendingCount());
+            } finally {
+                executor.shutdownNow();
+                assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+                context.close();
+            }
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void rejected_ordinary_graph_cleanup_finishes_without_registration(boolean closed) {

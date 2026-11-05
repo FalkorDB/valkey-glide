@@ -410,10 +410,14 @@ This does not abort native/server work or make arbitrary derived `CompletableFut
 cancellation. Native operations and admission limits may remain active until native completion.
 Cancellation regressions cover zero/nonzero Java timeouts, late native callbacks,
 one-slot admission, and cleanup ordering on success, error, and cancellation.
+Concurrent `Graph.close()` calls all wait for selection invalidation even when another caller has
+already claimed the phantom cleanup action. Parameter lists use one forward traversal, including
+sequential lists, while retaining zero-based validation paths and immutable snapshots.
 Live cancellation cases use real JNI dispatch under both protocols/topologies with one Java slot and
 zero Java timeout, independently of native admission. Owned blocking commands are explicitly released
-and verified consumed. A suite-scoped owned client prevents correlation-ID reuse while late native
-callbacks may arrive; it closes after all test containers finish.
+and verified consumed. The one-slot transport owns a separately created native client; closing it
+must leave the independent seed client usable. A suite-scoped owned client prevents correlation-ID
+reuse while late native callbacks may arrive; it closes after all test containers finish.
 Graph names, query text, parameter strings, and map keys share strict Unicode validation before
 JNI/protobuf encoding. Unit tests reject unpaired high/low surrogates before selection or submission;
 live query and read-only tests preserve supplementary characters in graph names and query literals.

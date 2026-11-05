@@ -4,6 +4,7 @@ package glide.internal;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import command_request.CommandRequestOuterClass.RequestType;
@@ -11,12 +12,14 @@ import glide.api.BaseClient;
 import glide.api.GlideClient;
 import glide.api.GlideClusterClient;
 import glide.api.Graph;
+import glide.api.models.configuration.BaseClientConfiguration;
 import glide.api.models.configuration.GlideClientConfiguration;
 import glide.api.models.configuration.GlideClusterClientConfiguration;
 import glide.api.models.configuration.NodeAddress;
 import glide.api.models.configuration.ProtocolVersion;
 import glide.api.models.graph.GraphQueryOptions;
 import glide.managers.CommandManager;
+import glide.managers.ConnectionManager;
 import graph_request.GraphRequest;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
@@ -26,7 +29,6 @@ import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.extension.BeforeEachCallback;
@@ -40,8 +42,6 @@ import org.junit.jupiter.params.provider.MethodSource;
 @Tag("falkordb")
 @ExtendWith(GlideCoreClientCancellationLiveTest.NativeRegistryLifetime.class)
 class GlideCoreClientCancellationLiveTest {
-    private static final AtomicLong COUNTER_KEYS = new AtomicLong(Long.MAX_VALUE);
-
     private static Stream<Arguments> clients() {
         return Stream.of(false, true)
                 .flatMap(
@@ -62,12 +62,14 @@ class GlideCoreClientCancellationLiveTest {
         String listKey = prefix + "list";
         try (BaseClient owner = connect(cluster, protocol);
                 BaseClient control = connect(cluster, protocol);
-                GlideCoreClient oneSlot =
-                        new GlideCoreClient(
-                                coreClient(owner).getNativeHandle(), 1, 0, COUNTER_KEYS.getAndDecrement())) {
+                GlideCoreClient oneSlot = owningOneSlot(cluster, protocol)) {
             boolean blockingSubmitted = false;
             boolean released = false;
             try {
+                assertNotEquals(
+                        coreClient(owner).getNativeHandle(),
+                        oneSlot.getNativeHandle(),
+                        "One-slot transport must own a distinct native client, not the seed client's handle");
                 try (Graph seed = owner.selectGraph(graphKey)) {
                     seed.query("CREATE ()").get(10, TimeUnit.SECONDS);
                 }
@@ -129,6 +131,11 @@ class GlideCoreClientCancellationLiveTest {
                     control.del(new String[] {listKey, graphKey}).get(10, TimeUnit.SECONDS);
                 }
             }
+            oneSlot.close();
+            assertEquals(
+                    0L,
+                    owner.exists(new String[] {graphKey}).get(10, TimeUnit.SECONDS),
+                    "Closing the one-slot transport must not close the independent seed client");
         }
     }
 
@@ -159,7 +166,30 @@ class GlideCoreClientCancellationLiveTest {
         return (GlideCoreClient) core.get(manager.get(client));
     }
 
+    private static GlideCoreClient owningOneSlot(boolean cluster, ProtocolVersion protocol) {
+        byte[] request =
+                ConnectionManager.buildConnectionRequest(configuration(cluster, protocol)).toByteArray();
+        long handle = GlideNativeBridge.createClient(request, null, null);
+        try {
+            return new GlideCoreClient(handle, 1, 0);
+        } catch (RuntimeException | Error failure) {
+            if (handle != 0) {
+                GlideNativeBridge.closeClient(handle);
+            }
+            throw failure;
+        }
+    }
+
     private static BaseClient connect(boolean cluster, ProtocolVersion protocol) throws Exception {
+        BaseClientConfiguration configuration = configuration(cluster, protocol);
+        return cluster
+                ? GlideClusterClient.createClient((GlideClusterClientConfiguration) configuration)
+                        .get(10, TimeUnit.SECONDS)
+                : GlideClient.createClient((GlideClientConfiguration) configuration)
+                        .get(10, TimeUnit.SECONDS);
+    }
+
+    private static BaseClientConfiguration configuration(boolean cluster, ProtocolVersion protocol) {
         String variable = cluster ? "FALKORDB_CLUSTER_ENDPOINT" : "FALKORDB_STANDALONE_ENDPOINT";
         String endpoint = System.getenv(variable);
         if (endpoint == null || endpoint.isEmpty()) {
@@ -172,22 +202,18 @@ class GlideCoreClientCancellationLiveTest {
                         .port(Integer.parseInt(endpoint.substring(colon + 1)))
                         .build();
         return cluster
-                ? GlideClusterClient.createClient(
-                                GlideClusterClientConfiguration.builder()
-                                        .address(address)
-                                        .protocol(protocol)
-                                        .inflightRequestsLimit(1000)
-                                        .requestTimeout(5000)
-                                        .build())
-                        .get(10, TimeUnit.SECONDS)
-                : GlideClient.createClient(
-                                GlideClientConfiguration.builder()
-                                        .address(address)
-                                        .protocol(protocol)
-                                        .inflightRequestsLimit(1000)
-                                        .requestTimeout(5000)
-                                        .build())
-                        .get(10, TimeUnit.SECONDS);
+                ? GlideClusterClientConfiguration.builder()
+                        .address(address)
+                        .protocol(protocol)
+                        .inflightRequestsLimit(1000)
+                        .requestTimeout(5000)
+                        .build()
+                : GlideClientConfiguration.builder()
+                        .address(address)
+                        .protocol(protocol)
+                        .inflightRequestsLimit(1000)
+                        .requestTimeout(5000)
+                        .build();
     }
 
     static final class NativeRegistryLifetime implements BeforeEachCallback {
