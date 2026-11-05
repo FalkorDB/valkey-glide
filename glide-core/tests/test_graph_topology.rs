@@ -102,6 +102,7 @@ async fn core_client(
             periodic_checks: Some(PeriodicCheck::Disabled),
             request_timeout: Some(5000),
             connection_timeout: Some(5000),
+            inflight_requests_limit: Some(1),
             ..Default::default()
         },
         None,
@@ -539,7 +540,7 @@ async fn redirected_graph(protocol: ProtocolVersion, asking: bool) {
             unique_name("redirect-client"),
         )
         .await;
-        let graph = GraphContext::new(client, lease.key.clone(), 0).unwrap();
+        let graph = GraphContext::new(client.clone(), lease.key.clone(), 0).unwrap();
         if asking {
             lease.begin_import().await;
         } else {
@@ -565,6 +566,7 @@ async fn redirected_graph(protocol: ProtocolVersion, asking: bool) {
             .await
             .unwrap();
         assert_path(&result);
+        assert_eq!(client.available_inflight_count(), 1);
         observation
             .assert_graph_affinity(&lease.key, "GRAPH.QUERY", CREATE_PATH, asking)
             .await;

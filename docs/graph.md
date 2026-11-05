@@ -141,7 +141,9 @@ coordinate graph deletion, restoration and replacement with readers. Do not
 treat a matching schema counter as proof of incarnation identity.
 
 Only explicit `MOVED`/`ASK` replies, which reject execution, permit bounded
-rerouting. The graph path does not add transport replay after timeout,
+rerouting. Completed attempts release their inflight slot before redirect or
+metadata admission, including when the client has a one-request limit.
+The graph path does not add transport replay after timeout,
 disconnect, runtime error, malformed result or failed metadata read. A successful
 write is **never rerun** to recover its result. An error after execution may mean
 that a write already committed; application retries must account for that.

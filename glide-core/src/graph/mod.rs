@@ -128,6 +128,8 @@ impl GraphContext {
                         && redirects < 5 =>
                 {
                     redirects += 1;
+                    // Release the completed attempt's tracker before re-admission.
+                    command = self.command(query, readonly, options.timeout_ms);
                     connection = client.graph_connection(&command, Some(&error)).await?;
                 }
                 result => break result?,
