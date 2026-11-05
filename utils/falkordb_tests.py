@@ -469,6 +469,48 @@ class HarnessTests(unittest.TestCase):
                 any(call.args[0] == "exec" for call in docker.call_args_list)
             )
 
+    def test_malformed_bridge_probe_preserves_diagnostic_cause_and_cleanup(
+        self,
+    ) -> None:
+        """Real RESP parse failures retain endpoint guidance and close owned resources."""
+        for wire, message in (
+            (b"?not-resp\r\n", "Unsupported RESP prefix"),
+            (b"*-2\r\n", "Invalid RESP aggregate length"),
+            (b"+\xff\r\n", "codec can't decode"),
+        ):
+            with self.subTest(wire=wire):
+                harness = Harness(Path("unused-falkordb-state.json"))
+                stream = io.BytesIO(wire)
+                with (
+                    patch("falkordb_harness.sys.platform", "linux"),
+                    patch(
+                        "falkordb_harness.docker", return_value="owned-network"
+                    ) as docker,
+                    patch.object(harness, "save"),
+                    patch.object(
+                        harness, "add_node", return_value={"ip": "172.25.0.2"}
+                    ),
+                    patch.object(harness, "stop") as stop,
+                    patch("falkordb_protocol.socket.create_connection") as connect,
+                ):
+                    connect.return_value.makefile.return_value = stream
+                    with self.assertRaisesRegex(
+                        RuntimeError, "172.25.0.2:6379.*MOVED/ASK"
+                    ) as raised:
+                        harness.start("cluster")
+                    cause = raised.exception.__cause__
+                    self.assertIsInstance(cause, ValueError)
+                    self.assertRegex(str(cause), message)
+                    self.assertIs(cause, raised.exception.__context__)
+                    self.assertTrue(stream.closed)
+                    connect.return_value.close.assert_called_once_with()
+                    stop.assert_called_once_with()
+                    self.assertNotIn("ready", harness.state)
+                    self.assertNotIn("environment", harness.state)
+                    self.assertFalse(
+                        any(call.args[0] == "exec" for call in docker.call_args_list)
+                    )
+
 
 class RecordingTests(unittest.TestCase):
     """Recording is a transaction across protocols, topology, cleanup and safety."""

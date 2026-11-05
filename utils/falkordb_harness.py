@@ -190,7 +190,7 @@ class Harness:
                 with Connection(str(node["ip"]), 6379, timeout=2) as conn:
                     if conn.command("PING").plain() != "PONG":
                         raise RuntimeError("Unexpected PING response")
-            except (OSError, RuntimeError, ConnectionError) as error:
+            except (OSError, RuntimeError, ConnectionError, ValueError) as error:
                 raise RuntimeError(
                     f"Advertised cluster endpoint {endpoint} is unreachable from "
                     "this client host. FalkorDB cluster tests require a native "
