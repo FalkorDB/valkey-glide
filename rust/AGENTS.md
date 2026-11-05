@@ -46,6 +46,9 @@ cargo unit-tests         # alias for: cargo test --lib        (no server needed;
 cargo doc-tests          # alias for: cargo test --doc        (no server; compiles README.md + migration.md examples)
 cargo integration-tests  # alias for: cargo test --test it_*  (self-boots an ephemeral server per harness; needs valkey-server/redis-server + python3 + a *-cli on PATH)
 
+# Dedicated FalkorDB conformance: start utils/falkordb_README.md harness first
+cargo test --test graph -- --include-ignored  # exported standalone/cluster endpoints; both APIs and protocols
+
 # Run a single integration test. matrix_test! expands one source test into
 # standalone_resp2/resp3 + cluster_resp2/resp3, so filter on the expansion:
 cargo test --test it_hash
