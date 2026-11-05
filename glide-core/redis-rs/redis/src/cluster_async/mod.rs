@@ -502,6 +502,12 @@ where
         let redirect = error.redirect(false).ok_or_else(|| {
             RedisError::from((ErrorKind::ClientError, "Expected a MOVED or ASK redirect"))
         })?;
+        let redirect = match redirect {
+            Redirect::Moved(address) => Redirect::Moved(self.inner_core.resolve_address(&address)),
+            Redirect::Ask(address, asking) => {
+                Redirect::Ask(self.inner_core.resolve_address(&address), asking)
+            }
+        };
         ClusterConnInner::get_connection(
             InternalSingleNodeRouting::Redirect {
                 redirect,
