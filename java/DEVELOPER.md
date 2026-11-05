@@ -401,6 +401,12 @@ worker, parent-close resource release, and live completion after the Java select
 Graph-only completion tests force dependent requests to run immediately after success and failure,
 verifying registry cleanup releases a one-slot inflight limit before exposing completion. Dedicated
 one-slot entity tests keep that graph transport coverage separate from ordinary command sequencing.
+Ordinary commands used for graph setup and teardown also complete only after registry cleanup.
+The lifetime tests check that boundary directly on successful `DEL` and rejected ordinary `GET`
+commands; entity teardown chains `DEL` to `EXISTS` with one inflight slot without an intermediate wait.
+Graph names, query text, parameter strings, and map keys share strict Unicode validation before
+JNI/protobuf encoding. Unit tests reject unpaired high/low surrogates before selection or submission;
+live query and read-only tests preserve supplementary characters in graph names and query literals.
 Configured-replica tests use both primary and replica addresses with `PREFER_REPLICA`. The shared
 `falkordb_monitor.py` helper proves the read-only entity query and all three schema dictionary reads
 execute exactly once on the same replica connection, under both client protocols, without writes.

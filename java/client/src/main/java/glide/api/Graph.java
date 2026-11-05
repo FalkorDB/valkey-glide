@@ -4,6 +4,7 @@ package glide.api;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import glide.api.models.graph.GraphQueryOptions;
 import glide.api.models.graph.GraphQueryResult;
+import glide.internal.GraphRequestValidation;
 import glide.internal.GraphResponseMapper;
 import glide.internal.NativeGraphContext;
 import glide.managers.CommandManager;
@@ -15,7 +16,8 @@ import java.util.concurrent.CompletableFuture;
  * A local FalkorDB graph selection. Graph lifetime is independent of graph existence on the server.
  * Closing the parent client makes subsequent operations fail with the normal closing exception.
  * Closing this handle releases its selection without closing the parent or deleting the server
- * graph.
+ * graph. Query text containing unpaired UTF-16 surrogates is rejected synchronously before
+ * transport submission.
  */
 public final class Graph implements AutoCloseable {
     private final BaseClient parent;
@@ -77,7 +79,7 @@ public final class Graph implements AutoCloseable {
 
     private CompletableFuture<GraphQueryResult> execute(
             String query, GraphQueryOptions options, boolean readonly) {
-        Objects.requireNonNull(query, "query");
+        GraphRequestValidation.validateUnicode(query, "query");
         Objects.requireNonNull(options, "options");
         GraphRequest.QueryRequest.Builder request =
                 GraphRequest.QueryRequest.newBuilder()

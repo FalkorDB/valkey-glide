@@ -375,6 +375,8 @@ try (Graph graph = client.selectGraph("people:{tenant}")) {
 }
 ```
 
+Graph names and query text must be valid Unicode; unpaired UTF-16 surrogates are rejected
+synchronously before native selection or query submission rather than silently replaced.
 `query` and `roQuery` return `CompletableFuture<GraphQueryResult>` through the normal client
 request, backpressure, error, and completion machinery. `roQuery` uses `GRAPH.RO_QUERY`, so the
 server rejects writes. Use typed parameters rather than string interpolation: supported values

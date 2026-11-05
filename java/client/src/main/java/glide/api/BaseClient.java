@@ -326,6 +326,7 @@ import glide.ffi.resolvers.GlideValueResolver;
 import glide.ffi.resolvers.NativeUtils;
 import glide.ffi.resolvers.StatisticsResolver;
 import glide.internal.GlideCoreClient;
+import glide.internal.GraphRequestValidation;
 import glide.managers.BaseResponseResolver;
 import glide.managers.CommandManager;
 import glide.managers.ConnectionManager;
@@ -470,9 +471,10 @@ public abstract class BaseClient
      *
      * @param name graph key, including any cluster hash tag
      * @return graph bound to this client and the current database
+     * @throws IllegalArgumentException if the name is empty or contains unpaired UTF-16 surrogates
      */
     public Graph selectGraph(String name) {
-        java.util.Objects.requireNonNull(name, "name");
+        GraphRequestValidation.validateUnicode(name, "name");
         if (name.isEmpty()) {
             throw new IllegalArgumentException("Graph name must not be empty");
         }

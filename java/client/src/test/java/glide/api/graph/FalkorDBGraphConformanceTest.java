@@ -80,7 +80,7 @@ class FalkorDBGraphConformanceTest {
     void canonical_values_params_statistics_and_lifetime(boolean cluster, ProtocolVersion protocol)
             throws Exception {
         BaseClient client = connect(cluster, protocol);
-        String key = "java:{" + UUID.randomUUID() + "}:graph";
+        String key = "java:{" + UUID.randomUUID() + "}:graph:🌐";
         Graph graph = client.selectGraph(key);
         try {
             assertSame(client, graph.getClient());
@@ -90,7 +90,7 @@ class FalkorDBGraphConformanceTest {
                             .query(
                                     "CREATE p=(a:Person:Researcher {name:'Ada',age:42})"
                                             + "-[r:KNOWS {since:2020}]->(b:Person {name:'Bob'}) RETURN "
-                                            + "null AS null_value, 'text' AS string_value, "
+                                            + "null AS null_value, 'textλ🌐' AS string_value, "
                                             + "-9223372036854775808 AS integer_value, true AS boolean_value, "
                                             + "1.5 AS double_value, [1,null,{nested:[false,'x']}] AS list_value, "
                                             + "r AS relationship_value, a AS node_value, p AS path_value, "
@@ -103,6 +103,7 @@ class FalkorDBGraphConformanceTest {
                                             + "duration('P1Y2M3DT4H5M6S') AS duration_value")
                             .get(10, TimeUnit.SECONDS);
             assertEquals(16, all.getColumns().size());
+            assertEquals("textλ🌐", all.getRows().get(0).get(1).getValue());
             assertEquals(Long.MIN_VALUE, all.getRows().get(0).get(2).getValue());
             assertInstanceOf(GraphRelationship.class, all.getRows().get(0).get(6).getValue());
             GraphNode node = assertInstanceOf(GraphNode.class, all.getRows().get(0).get(7).getValue());
@@ -127,16 +128,31 @@ class FalkorDBGraphConformanceTest {
             GraphQueryResult roundtrip =
                     graph
                             .roQuery(
-                                    "RETURN $min, $max, $text, $nested",
+                                    "RETURN $min, $max, $text, $nested, 'λ🌐'",
                                     GraphQueryOptions.builder().params(params).timeoutMs(0L).build())
                             .get(10, TimeUnit.SECONDS);
             assertEquals(Long.MIN_VALUE, roundtrip.getRows().get(0).get(0).getValue());
             assertEquals(Long.MAX_VALUE, roundtrip.getRows().get(0).get(1).getValue());
             assertEquals(params.get("text"), roundtrip.getRows().get(0).get(2).getValue());
+            assertEquals("λ🌐", roundtrip.getRows().get(0).get(4).getValue());
             ExecutionException readonly =
                     assertThrows(
                             ExecutionException.class, () -> graph.roQuery("CREATE ()").get(10, TimeUnit.SECONDS));
             assertInstanceOf(RequestException.class, readonly.getCause());
+            CompletableFuture<String> ordinaryError = client.get(key);
+            assertEquals(
+                    0,
+                    ordinaryError
+                            .handle(
+                                    (value, error) -> {
+                                        assertNotNull(error, "GET must reject a graph key with WRONGTYPE");
+                                        return AsyncRegistry.getPendingCount();
+                                    })
+                            .get(10, TimeUnit.SECONDS));
+            assertInstanceOf(
+                    RequestException.class,
+                    assertThrows(ExecutionException.class, () -> ordinaryError.get(10, TimeUnit.SECONDS))
+                            .getCause());
 
             client.del(new String[] {key}).get(10, TimeUnit.SECONDS);
             GraphQueryResult writeOnly =
@@ -192,7 +208,18 @@ class FalkorDBGraphConformanceTest {
             }
         } finally {
             try {
-                client.del(new String[] {key}).get(10, TimeUnit.SECONDS);
+                client
+                        .del(new String[] {key})
+                        .thenApply(
+                                deleted -> {
+                                    assertEquals(
+                                            0,
+                                            AsyncRegistry.getPendingCount(),
+                                            "Graph teardown must release ordinary command registration before"
+                                                    + " completion");
+                                    return deleted;
+                                })
+                        .get(10, TimeUnit.SECONDS);
             } finally {
                 client.close();
             }
@@ -230,7 +257,12 @@ class FalkorDBGraphConformanceTest {
             assertEquals("KNOWS", path.getRelationships().get(0).getType());
         } finally {
             try {
-                client.del(new String[] {key}).get(10, TimeUnit.SECONDS);
+                assertEquals(
+                        0L,
+                        client
+                                .del(new String[] {key})
+                                .thenCompose(deleted -> client.exists(new String[] {key}))
+                                .get(10, TimeUnit.SECONDS));
             } finally {
                 client.close();
             }

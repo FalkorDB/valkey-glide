@@ -10,6 +10,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -26,11 +27,14 @@ import glide.managers.CommandManager;
 import graph_request.GraphRequest.QueryRequest;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 
@@ -111,6 +115,104 @@ class GraphTest {
         when(commands.selectGraphContext("graph"))
                 .thenThrow(new RequestException("Database selection is unsettled"));
         assertThrows(RequestException.class, () -> client.selectGraph("graph"));
+    }
+
+    @ParameterizedTest(name = "malformed query case {index}")
+    @ValueSource(
+            strings = {
+                "\uD800",
+                "\uDBFF",
+                "\uDC00",
+                "\uDFFF",
+                "\uD800x",
+                "x\uDC00",
+                "\uD800\uD800",
+                "\uDC00\uD800",
+                "\uD83D\uDE00\uD800"
+            })
+    void malformed_query_unicode_rejects_before_submission(String malformed) {
+        when(commands.submitGraphQuery(any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(empty()));
+        Graph graph = client.selectGraph("graph");
+        GraphQueryOptions options = GraphQueryOptions.builder().build();
+        String query = "CREATE (:Item {value:'" + malformed + "'})";
+        assertEquals(
+                "query: unpaired Unicode surrogate",
+                assertThrows(IllegalArgumentException.class, () -> graph.query(query)).getMessage());
+        assertThrows(IllegalArgumentException.class, () -> graph.query(query, options));
+        assertThrows(IllegalArgumentException.class, () -> graph.roQuery(query));
+        assertThrows(IllegalArgumentException.class, () -> graph.roQuery(query, options));
+        verify(commands).selectGraphContext("graph");
+        verifyNoMoreInteractions(commands);
+    }
+
+    @ParameterizedTest(name = "malformed graph name case {index}")
+    @ValueSource(
+            strings = {
+                "\uD800",
+                "\uDBFF",
+                "\uDC00",
+                "\uDFFF",
+                "\uD800x",
+                "x\uDC00",
+                "\uD800\uD800",
+                "\uDC00\uD800",
+                "\uD83D\uDE00\uD800"
+            })
+    void malformed_graph_name_unicode_rejects_before_native_selection(String malformed) {
+        IllegalArgumentException error =
+                assertThrows(
+                        IllegalArgumentException.class, () -> client.selectGraph("graph:{" + malformed + "}"));
+        assertEquals("name: unpaired Unicode surrogate", error.getMessage());
+        verifyNoMoreInteractions(commands);
+    }
+
+    @ParameterizedTest(name = "valid graph scalar case {index}")
+    @ValueSource(
+            strings = {"plain", "\uD7FF", "\uE000", "\uD800\uDC00", "\uDBFF\uDFFF", "λ\uD83D\uDE00"})
+    void graph_name_and_query_unicode_preserve_exact_scalar_values(String unicode) throws Exception {
+        String name = "graph:{" + unicode + "}";
+        String query = "RETURN '" + unicode + "'";
+        when(context.getName()).thenReturn(name);
+        when(commands.submitGraphQuery(any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(empty()));
+        Graph graph = client.selectGraph(name);
+        GraphQueryOptions options = GraphQueryOptions.builder().build();
+        graph.query(query).join();
+        graph.query(query, options).join();
+        graph.roQuery(query).join();
+        graph.roQuery(query, options).join();
+        ArgumentCaptor<byte[]> bytes = ArgumentCaptor.forClass(byte[].class);
+        verify(commands).selectGraphContext(name);
+        verify(commands, times(4)).submitGraphQuery(eq(context), bytes.capture());
+        List<byte[]> requests = bytes.getAllValues();
+        for (int i = 0; i < requests.size(); i++) {
+            QueryRequest request = QueryRequest.parseFrom(requests.get(i));
+            assertEquals(name, request.getGraphName());
+            assertEquals(query, request.getQuery());
+            assertEquals(i >= 2, request.getReadonly());
+        }
+        verifyNoMoreInteractions(commands);
+    }
+
+    @Test
+    void null_query_and_options_reject_but_empty_query_is_forwarded_unchanged() throws Exception {
+        when(commands.submitGraphQuery(any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(empty()));
+        Graph graph = client.selectGraph("graph");
+        assertThrows(NullPointerException.class, () -> graph.query(null));
+        assertThrows(NullPointerException.class, () -> graph.roQuery(null));
+        assertThrows(NullPointerException.class, () -> graph.query("RETURN 1", null));
+        assertThrows(NullPointerException.class, () -> graph.roQuery("RETURN 1", null));
+        graph.query("").join();
+        graph.roQuery("").join();
+        ArgumentCaptor<byte[]> bytes = ArgumentCaptor.forClass(byte[].class);
+        verify(commands).selectGraphContext("graph");
+        verify(commands, times(2)).submitGraphQuery(eq(context), bytes.capture());
+        for (byte[] request : bytes.getAllValues()) {
+            assertEquals("", QueryRequest.parseFrom(request).getQuery());
+        }
+        verifyNoMoreInteractions(commands);
     }
 
     @Test

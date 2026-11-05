@@ -2,6 +2,7 @@
 package glide.api.models.graph;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import glide.internal.GraphRequestValidation;
 import graph_request.GraphRequest.Parameter;
 import graph_request.GraphRequest.ParameterEntry;
 import graph_request.GraphRequest.ParameterList;
@@ -73,7 +74,7 @@ public final class GraphQueryOptions {
             return result.setDoubleValue(number).build();
         }
         if (value instanceof String) {
-            validateUnicode((String) value, path);
+            GraphRequestValidation.validateUnicode((String) value, path);
             return result.setStringValue((String) value).build();
         }
         if (value instanceof Map<?, ?>) {
@@ -127,21 +128,8 @@ public final class GraphQueryOptions {
         }
     }
 
-    private static void validateUnicode(String value, String path) {
-        for (int i = 0; i < value.length(); i++) {
-            char current = value.charAt(i);
-            if (Character.isHighSurrogate(current)) {
-                if (i + 1 >= value.length() || !Character.isLowSurrogate(value.charAt(++i))) {
-                    throw invalid(path, "unpaired Unicode surrogate");
-                }
-            } else if (Character.isLowSurrogate(current)) {
-                throw invalid(path, "unpaired Unicode surrogate");
-            }
-        }
-    }
-
     private static void validateIdentifier(String key, String path) {
-        validateUnicode(key, path);
+        GraphRequestValidation.validateUnicode(key, path);
         if (key.isEmpty()) {
             throw invalid(path, "map keys must be nonempty");
         }

@@ -475,44 +475,47 @@ public class GlideCoreClient implements AutoCloseable {
             boolean expectUtf8Response,
             long timeoutMs,
             long spanPtr) {
+        CompletableFuture<Object> future = new CompletableFuture<>();
+        CompletableFuture<Void> cleanup = new CompletableFuture<>();
+        // Ordinary commands used around graph queries must expose completion after cleanup, too.
+        CompletableFuture<Object> completed = cleanup.thenCompose(ignored -> future);
+        boolean registered = false;
         try {
             long handle = nativeClientHandle.get();
             if (handle == 0) {
-                CompletableFuture<Object> future = new CompletableFuture<>();
-                future.completeExceptionally(
-                        new glide.api.models.exceptions.ClosingException("Client is closed"));
-                return future;
+                throw new glide.api.models.exceptions.ClosingException("Client is closed");
             }
 
-            CompletableFuture<Object> future = new CompletableFuture<>();
-            long correlationId;
-            try {
-                correlationId =
-                        AsyncRegistry.register(
-                                future, this.maxInflightRequests, handle, this.inflightCounterKey, timeoutMs);
-            } catch (glide.api.models.exceptions.RequestException e) {
-                future.completeExceptionally(e);
-                return future;
+            long correlationId =
+                    AsyncRegistry.register(
+                            future,
+                            this.maxInflightRequests,
+                            handle,
+                            this.inflightCounterKey,
+                            timeoutMs,
+                            cleanup);
+            registered = correlationId != 0;
+            if (registered) {
+                GlideNativeBridge.executeCommandAsync(
+                        handle,
+                        correlationId,
+                        requestType,
+                        args != null ? args : EMPTY_2D_BYTE_ARRAY,
+                        hasRoute,
+                        routeType,
+                        routeParam,
+                        expectUtf8Response,
+                        spanPtr);
+            } else {
+                cleanup.complete(null);
             }
-
-            GlideNativeBridge.executeCommandAsync(
-                    handle,
-                    correlationId,
-                    requestType,
-                    args != null ? args : EMPTY_2D_BYTE_ARRAY,
-                    hasRoute,
-                    routeType,
-                    routeParam,
-                    expectUtf8Response,
-                    spanPtr);
-
-            return future;
-
-        } catch (Exception e) {
-            CompletableFuture<Object> future = new CompletableFuture<>();
+        } catch (Exception | LinkageError e) {
             future.completeExceptionally(e);
-            return future;
+            if (!registered) {
+                cleanup.complete(null);
+            }
         }
+        return completed;
     }
 
     /** Execute a script asynchronously via JNI. */

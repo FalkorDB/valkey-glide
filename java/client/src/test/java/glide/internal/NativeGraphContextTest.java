@@ -14,6 +14,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
 import glide.api.models.exceptions.ClosingException;
+import glide.api.models.exceptions.RequestException;
 import java.lang.ref.PhantomReference;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -26,6 +27,47 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 class NativeGraphContextTest {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rejected_ordinary_graph_cleanup_finishes_without_registration(boolean closed) {
+        AsyncRegistry.reset();
+        try (GlideCoreClient client = new GlideCoreClient(Long.MAX_VALUE - 103, 1, 0)) {
+            if (closed) {
+                client.close();
+            } else {
+                AsyncRegistry.failAllWithError("test shutdown");
+            }
+            CompletableFuture<Object> rejected =
+                    client.executeCommandAsync(0, new byte[0][], false, 0, null, true, 0, 0);
+            assertTrue(rejected.isCompletedExceptionally());
+            assertInstanceOf(
+                    ClosingException.class,
+                    assertThrows(CompletionException.class, rejected::join).getCause());
+            assertEquals(0, AsyncRegistry.getPendingCount());
+        } finally {
+            AsyncRegistry.reset();
+        }
+    }
+
+    @Test
+    void ordinary_graph_cleanup_inflight_rejection_does_not_leave_a_cleanup_barrier_pending() {
+        AsyncRegistry.reset();
+        long handle = Long.MAX_VALUE - 104;
+        try (GlideCoreClient client = new GlideCoreClient(handle, 1, 0)) {
+            CompletableFuture<Object> pending = new CompletableFuture<>();
+            AsyncRegistry.register(pending, 1, handle, 0);
+            CompletableFuture<Object> rejected =
+                    client.executeCommandAsync(0, new byte[0][], false, 0, null, true, 0, 0);
+            assertTrue(rejected.isCompletedExceptionally());
+            assertInstanceOf(
+                    RequestException.class,
+                    assertThrows(CompletionException.class, rejected::join).getCause());
+            assertEquals(1, AsyncRegistry.getPendingCount());
+            pending.complete(null);
+            assertEquals(0, AsyncRegistry.getPendingCount());
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void rejected_graph_dispatch_finishes_without_a_registered_cleanup_hook(boolean closed) {
