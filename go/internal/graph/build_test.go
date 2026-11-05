@@ -13,13 +13,20 @@ import (
 )
 
 func TestGraphTestBuildTags(t *testing.T) {
-	for _, libc := range []string{"gnu", "musl"} {
-		t.Run(libc, func(t *testing.T) {
+	for _, platform := range []struct {
+		goarch, arch, triplet string
+	}{
+		{"amd64", "x86_64", "x86_64-unknown-linux-gnu"},
+		{"amd64", "x86_64", "x86_64-unknown-linux-musl"},
+		{"arm64", "aarch64", "aarch64-unknown-linux-gnu"},
+		{"arm64", "aarch64", "aarch64-unknown-linux-musl"},
+	} {
+		t.Run(platform.goarch+"/"+platform.triplet, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			command := exec.CommandContext(ctx, "make", "--no-print-directory", "-s", "-n", "-C", "../..",
-				"graph-test", "UNAME=Linux", "ARCH=x86_64", "IS_ALPINE=false",
-				"TARGET_TRIPLET=x86_64-unknown-linux-"+libc)
+				"graph-test", "UNAME=Linux", "ARCH="+platform.arch, "IS_ALPINE=false",
+				"TARGET_TRIPLET="+platform.triplet)
 			output, err := command.CombinedOutput()
 			if err != nil {
 				t.Fatalf("make graph-test dry run: %s: %v", output, err)
@@ -31,12 +38,12 @@ func TestGraphTestBuildTags(t *testing.T) {
 			tags := match[1] + match[2]
 			command = exec.CommandContext(ctx, "go", "list", "-tags="+tags, "-f", "{{join .CgoLDFLAGS \" \"}}", ".")
 			command.Dir = "../.."
-			command.Env = append(os.Environ(), "CGO_ENABLED=1", "GOOS=linux", "GOARCH=amd64", "GOFLAGS=")
+			command.Env = append(os.Environ(), "CGO_ENABLED=1", "GOOS=linux", "GOARCH="+platform.goarch, "GOFLAGS=")
 			output, err = command.CombinedOutput()
 			if err != nil {
 				t.Fatalf("go list with graph test tags: %s: %v", output, err)
 			}
-			if !strings.Contains(string(output), "rustbin/x86_64-unknown-linux-"+libc) {
+			if !strings.Contains(string(output), "rustbin/"+platform.triplet) {
 				t.Fatalf("graph-test selected the wrong native library: %s", output)
 			}
 			if !strings.Contains(tags, "falkordb") {

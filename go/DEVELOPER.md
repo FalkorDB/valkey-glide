@@ -171,8 +171,10 @@ Tests create unique graph keys and delete only their own graphs; they never
 globally flush databases. The suite covers typed parameters, every graph value
 kind, schema resolution, read-only errors, database selection epochs, closed
 parents, pooled-handle rejection, in-flight cancellation, and positive server
-timeouts followed by successful reads. Expensive cancellation tests always use
-a bounded server timeout, and MONITOR verifies actual server dispatch.
+timeouts followed by successful reads. Real Graph API tests round-trip list and
+map parameters at depths 60 and 100 through the FFI and reject depth 101 in Go
+validation (the root parameter map is depth zero). Expensive cancellation tests
+always use a bounded server timeout, and MONITOR verifies actual server dispatch.
 After cancellation, a successful recovery read is required within a bounded
 three-second interval rather than assuming late callbacks arrive after a sleep.
 The target also runs native ownership tests from the root package: garbage
@@ -191,7 +193,9 @@ Use `CC=gcc GOFLAGS=-asan make graph-test` for Go/CGO AddressSanitizer coverage;
 the shared Rust library must be instrumented separately for Rust ASan coverage.
 
 Pure request-validation and canonical-result materialization tests can run
-without a native build:
+without a native build. They also verify `graph-test` build tags and native
+library selection for amd64/arm64 × GNU/MUSL via Make dry runs and `go list`;
+this does not require cross-linking native libraries:
 
 ```bash
 CGO_ENABLED=0 go test -count=1 -cover ./internal/graph

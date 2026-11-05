@@ -18,6 +18,7 @@ import (
 
 	glide "github.com/valkey-io/valkey-glide/go/v2"
 	"github.com/valkey-io/valkey-glide/go/v2/config"
+	"github.com/valkey-io/valkey-glide/go/v2/models"
 	"github.com/valkey-io/valkey-glide/go/v2/options"
 )
 
@@ -41,6 +42,63 @@ func address(t *testing.T, variable string) *config.NodeAddress {
 // The explicit RESP2/RESP3 standalone+cluster all16 matrix lives in the tagged
 // root graph_conformance_test.go so it can configure the normal protobuf client
 // transport without adding a public protocol-selection API solely for tests.
+
+func TestGraphParameterNesting(t *testing.T) {
+	client, err := glide.NewClient(config.NewClientConfiguration().
+		WithAddress(address(t, "FALKORDB_STANDALONE_ENDPOINT")).
+		WithRequestTimeout(5 * time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	name := fmt.Sprintf("glide-go-parameter-depth-%d", time.Now().UnixNano())
+	defer func() {
+		if _, err := client.CustomCommand(context.Background(), []string{"GRAPH.DELETE", name}); err != nil {
+			t.Logf("graph cleanup: %v", err)
+		}
+	}()
+	graph, err := client.SelectGraph(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"list", "map"} {
+		for _, depth := range []int{60, 100, 101} {
+			t.Run(fmt.Sprintf("%s/depth%d", kind, depth), func(t *testing.T) {
+				var parameter, expected any = int64(7), int64(7)
+				step := "[0]"
+				// The parameter root map is depth zero; the leaf starts at one.
+				for level := 1; level < depth; level++ {
+					if kind == "list" {
+						parameter, expected = []any{parameter}, []any{expected}
+					} else {
+						parameter = map[string]any{"value": parameter}
+						expected = models.GraphMap{{Key: "value", Value: expected}}
+						step = `["value"]`
+					}
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				result, err := graph.Query(ctx, "RETURN $nested AS nested",
+					options.NewGraphQueryOptions().SetParams(map[string]any{"nested": parameter}))
+				if depth == 101 {
+					path := `$["nested"]` + strings.Repeat(step, depth-1)
+					if err == nil || !strings.Contains(err.Error(), path) ||
+						!strings.Contains(err.Error(), "maximum nesting depth exceeded") {
+						t.Fatalf("depth 101 must fail Go validation at %s: %v", path, err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Go-accepted depth %d failed through the native Graph API: %v", depth, err)
+				}
+				if !reflect.DeepEqual(result.Columns, []string{"nested"}) ||
+					!reflect.DeepEqual(result.Rows, [][]any{{expected}}) {
+					t.Fatalf("depth %d changed the nested parameter value: %+v", depth, result)
+				}
+			})
+		}
+	}
+}
 
 func TestGraphDatabaseEpochAndPoolRejection(t *testing.T) {
 	cfg := config.NewClientConfiguration().WithAddress(address(t, "FALKORDB_STANDALONE_ENDPOINT"))
