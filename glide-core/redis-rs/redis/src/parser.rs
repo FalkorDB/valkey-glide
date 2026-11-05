@@ -28,6 +28,7 @@ use num_bigint::BigInt;
 const MAX_RECURSE_DEPTH: usize = 100;
 // Compact graph values add RESP aggregates around each logical list/map level.
 // The async scanner and builder are iterative, so this bound does not grow their call stacks.
+// Ordinary Value destruction still requires the supported native worker stack.
 const MAX_ASYNC_NESTING_DEPTH: usize = 512;
 
 fn err_parser(line: &str) -> ServerError {
@@ -1286,6 +1287,22 @@ mod tests {
     }
 
     #[cfg(feature = "aio")]
+    fn mixed_aggregate_wire(depth: usize) -> Vec<u8> {
+        let mut wire = Vec::new();
+        for level in 0..depth {
+            wire.extend_from_slice(match level % 5 {
+                0 => b"*1\r\n".as_slice(),
+                1 => b"%1\r\n+k\r\n".as_slice(),
+                2 => b"|1\r\n+k\r\n:1\r\n".as_slice(),
+                3 => b"~1\r\n".as_slice(),
+                _ => b">2\r\n+message\r\n".as_slice(),
+            });
+        }
+        wire.extend_from_slice(b":0\r\n");
+        wire
+    }
+
+    #[cfg(feature = "aio")]
     #[test]
     fn test_codec_builds_mixed_aggregates_on_a_small_stack() {
         use tokio_util::codec::Decoder;
@@ -1293,22 +1310,12 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(64 * 1024)
             .spawn(|| {
-                let mut wire = Vec::new();
-                for depth in 0..MAX_ASYNC_NESTING_DEPTH {
-                    wire.extend_from_slice(match depth % 5 {
-                        0 => b"*1\r\n".as_slice(),
-                        1 => b"%1\r\n+k\r\n".as_slice(),
-                        2 => b"|1\r\n+k\r\n:1\r\n".as_slice(),
-                        3 => b"~1\r\n".as_slice(),
-                        _ => b">2\r\n+message\r\n".as_slice(),
-                    });
-                }
-                wire.extend_from_slice(b":0\r\n");
+                let wire = mixed_aggregate_wire(MAX_ASYNC_NESTING_DEPTH);
                 let mut codec = ValueCodec::default();
                 let mut bytes = bytes::BytesMut::from(wire.as_slice());
                 let mut value = codec.decode(&mut bytes).unwrap().unwrap().unwrap();
                 assert!(bytes.is_empty());
-                // Consume the tree iteratively too: recursive Value destruction is not the parser.
+                // Construction-only test. Ordinary destruction requires the supported worker stack.
                 for depth in 0..MAX_ASYNC_NESTING_DEPTH {
                     value = match (depth % 5, value) {
                         (0, Value::Array(mut items)) | (3, Value::Set(mut items)) => {
@@ -1335,6 +1342,81 @@ mod tests {
                     };
                 }
                 assert_eq!(value, Value::Int(0));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[cfg(feature = "aio")]
+    #[test]
+    fn test_codec_decodes_and_drops_deep_values_on_a_standard_stack() {
+        use tokio_util::codec::Decoder;
+
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                for prefix in [
+                    b"*1\r\n".as_slice(),
+                    b"%1\r\n+k\r\n".as_slice(),
+                    b"|1\r\n+k\r\n:1\r\n".as_slice(),
+                    b"~1\r\n".as_slice(),
+                    b">2\r\n+message\r\n".as_slice(),
+                ] {
+                    let mut bytes = bytes::BytesMut::new();
+                    for _ in 0..MAX_ASYNC_NESTING_DEPTH {
+                        bytes.extend_from_slice(prefix);
+                    }
+                    bytes.extend_from_slice(b":0\r\n");
+                    let value = ValueCodec::default()
+                        .decode(&mut bytes)
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    assert!(bytes.is_empty());
+                    drop(value);
+                }
+                for depth in [MAX_ASYNC_NESTING_DEPTH - 1, MAX_ASYNC_NESTING_DEPTH] {
+                    let wire = mixed_aggregate_wire(depth);
+                    let mut codec = ValueCodec::default();
+                    let mut bytes = bytes::BytesMut::from(wire.as_slice());
+                    let value = codec.decode(&mut bytes).unwrap().unwrap().unwrap();
+                    assert!(bytes.is_empty());
+                    drop(value);
+                }
+                let mut codec = ValueCodec::default();
+                let mut bytes = bytes::BytesMut::from(
+                    mixed_aggregate_wire(MAX_ASYNC_NESTING_DEPTH + 1).as_slice(),
+                );
+                assert!(codec.decode(&mut bytes).is_err());
+                drop(codec);
+
+                for complete in [false, true] {
+                    let mut wire = b"*2\r\n".to_vec();
+                    wire.extend(mixed_aggregate_wire(MAX_ASYNC_NESTING_DEPTH - 1));
+                    if complete {
+                        wire.extend_from_slice(b",not-a-double\r\n");
+                        // The builder must clean up the completed deep sibling,
+                        // not merely reject incomplete/invalid framing.
+                        assert_eq!(
+                            super::zero_copy::scan_resume(
+                                &wire,
+                                &mut super::zero_copy::ScanState::default(),
+                            )
+                            .unwrap(),
+                            Some(wire.len())
+                        );
+                    }
+                    let mut codec = ValueCodec::default();
+                    let mut bytes = bytes::BytesMut::from(wire.as_slice());
+                    let decoded = codec.decode(&mut bytes);
+                    if complete {
+                        assert!(decoded.unwrap_err().to_string().contains("Expected double"));
+                    } else {
+                        assert!(decoded.unwrap().is_none());
+                    }
+                    drop(codec);
+                }
             })
             .unwrap()
             .join()

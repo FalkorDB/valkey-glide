@@ -11,6 +11,9 @@
 //! The blocking methods here must not be called from within an async context
 //! (a running Tokio runtime) — doing so panics with tokio's "cannot block the
 //! current thread from within a runtime".
+//!
+//! Deeply nested replies require at least 2 MiB of native caller stack. Sizing
+//! the shared runtime's workers does not resize the thread running `block_on`.
 
 use crate::AsyncTypedCommands;
 use crate::client::{GlideClient, GlideClusterClient};
@@ -32,6 +35,10 @@ fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
         Builder::new_multi_thread()
             .enable_all()
+            .thread_stack_size(
+                glide_core::client::configured_thread_stack_size()
+                    .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+            )
             .thread_name("glide-sync")
             .build()
             .expect("failed to build the shared GLIDE sync runtime")

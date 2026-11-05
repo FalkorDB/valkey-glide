@@ -150,8 +150,12 @@ async fn main() -> glide::ValkeyResult<()> {
 
 Graph integers and IDs are `i64`; temporal values retain the server's lossless
 payload rather than implying native calendar or elapsed-duration semantics.
+Custom runtime workers and blocking-caller threads processing deeply nested
+replies must have at least 2 MiB of native stack. GLIDE sizes its own workers but
+does not resize caller-owned threads; nested values still drop recursively.
 See the [Graph API compatibility guide](../docs/graph.md) for all value types,
-database lifetime, metadata ACLs and operation-scoped schema consistency limits.
+database lifetime, stack configuration, metadata ACLs and operation-scoped schema
+consistency limits.
 
 ## Cluster & routing
 

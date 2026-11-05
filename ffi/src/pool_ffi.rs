@@ -93,6 +93,10 @@ fn get_pool_runtime() -> &'static tokio::runtime::Runtime {
     POOL_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            .thread_stack_size(
+                glide_core::client::configured_thread_stack_size()
+                    .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+            )
             .worker_threads(2)
             .thread_name("glide-pool")
             .build()
@@ -294,64 +298,71 @@ pub unsafe extern "C" fn glide_pool_create(
             let pool_clone = pool_arc.clone();
             let bytes = connection_request.clone();
             let ct_clone = ct.clone();
-            std::thread::spawn(move || {
-                let pre_cid = glide_core::pool::allocate_client_id() as usize;
-                match create_pool_client(&bytes, ct_clone, pre_cid) {
-                    Ok((adapter_ptr, client)) => {
-                        // Use block_on for warmup — this runs during pool creation
-                        // (initialization), not during acquire/release contention,
-                        // so blocking is safe and guarantees clients are ready.
-                        let rt = get_pool_runtime();
-                        rt.block_on(async {
-                            let mut pool = pool_clone.lock().await;
-                            if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
-                                // Give the reserved slot back; the pool is gone.
-                                pool.release_reservation();
-                                // Never stored in get_pool_clients(), so glide_pool_destroy cannot reclaim it.
-                                drop_orphaned_adapter!(adapter_ptr);
-                                return;
-                            }
-                            // Use pre_cid (allocated before lock) to match POOL_ADAPTER_MAP entry;
-                            // p.next_id() would generate a different ID, breaking the adapter lookup.
-                            let client_id = pre_cid as u64;
-                            let flag = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-                            let entry = PooledClient {
-                                client_id,
-                                client: client.clone(),
-                                created_at: std::time::Instant::now(),
-                                last_idle_at: std::time::Instant::now(),
-                                borrowed_at: None,
-                                state: ClientState::Idle,
-                                is_blocking: flag.clone(),
-                            };
-                            // Slot already reserved above — do NOT increment total_count.
-                            pool.idle.push_back(entry);
-                            glide_core::pool::register_blocking_flag(client_id, flag);
-                            // Store adapter mapping
-                            get_pool_clients().insert(
-                                client_id,
-                                PoolClientEntry {
-                                    adapter_ptr,
-                                    client,
+            std::thread::Builder::new()
+                .stack_size(
+                    glide_core::client::configured_thread_stack_size()
+                        .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+                )
+                .spawn(move || {
+                    let pre_cid = glide_core::pool::allocate_client_id() as usize;
+                    match create_pool_client(&bytes, ct_clone, pre_cid) {
+                        Ok((adapter_ptr, client)) => {
+                            // Use block_on for warmup — this runs during pool creation
+                            // (initialization), not during acquire/release contention,
+                            // so blocking is safe and guarantees clients are ready.
+                            let rt = get_pool_runtime();
+                            rt.block_on(async {
+                                let mut pool = pool_clone.lock().await;
+                                if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
+                                    // Give the reserved slot back; the pool is gone.
+                                    pool.release_reservation();
+                                    // Never stored in get_pool_clients(), so glide_pool_destroy cannot reclaim it.
+                                    drop_orphaned_adapter!(adapter_ptr);
+                                    return;
+                                }
+                                // Use pre_cid (allocated before lock) to match POOL_ADAPTER_MAP entry;
+                                // p.next_id() would generate a different ID, breaking the adapter lookup.
+                                let client_id = pre_cid as u64;
+                                let flag =
+                                    std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+                                let entry = PooledClient {
+                                    client_id,
+                                    client: client.clone(),
                                     created_at: std::time::Instant::now(),
-                                },
+                                    last_idle_at: std::time::Instant::now(),
+                                    borrowed_at: None,
+                                    state: ClientState::Idle,
+                                    is_blocking: flag.clone(),
+                                };
+                                // Slot already reserved above — do NOT increment total_count.
+                                pool.idle.push_back(entry);
+                                glide_core::pool::register_blocking_flag(client_id, flag);
+                                // Store adapter mapping
+                                get_pool_clients().insert(
+                                    client_id,
+                                    PoolClientEntry {
+                                        adapter_ptr,
+                                        client,
+                                        created_at: std::time::Instant::now(),
+                                    },
+                                );
+                                get_pool_adapter_map().insert(adapter_ptr, (pool_id, client_id));
+                            });
+                        }
+                        Err(e) => {
+                            glide_logger::log_error_lazy!(
+                                "pool",
+                                format!("Background client creation failed: {}", e)
                             );
-                            get_pool_adapter_map().insert(adapter_ptr, (pool_id, client_id));
-                        });
+                            // Return the slot this warmup task reserved but never filled.
+                            let rt = get_pool_runtime();
+                            rt.block_on(async {
+                                pool_clone.lock().await.release_reservation();
+                            });
+                        }
                     }
-                    Err(e) => {
-                        glide_logger::log_error_lazy!(
-                            "pool",
-                            format!("Background client creation failed: {}", e)
-                        );
-                        // Return the slot this warmup task reserved but never filled.
-                        let rt = get_pool_runtime();
-                        rt.block_on(async {
-                            pool_clone.lock().await.release_reservation();
-                        });
-                    }
-                }
-            });
+                })
+                .expect("Failed to spawn GLIDE pool warmup thread");
         }
     }
 
@@ -398,63 +409,70 @@ pub extern "C" fn glide_pool_try_acquire(pool_id: u64) -> i64 {
                 let pool_clone = pool_arc.clone();
                 let bytes = pool.config.connection_request.clone();
                 drop(pool);
-                std::thread::spawn(move || {
-                    let pre_cid = glide_core::pool::allocate_client_id() as usize;
-                    let bg_ct = get_pool_client_types()
-                        .get(&pool_id)
-                        .map(|e| e.value().clone())
-                        .unwrap_or(ClientType::SyncClient);
-                    match create_pool_client(&bytes, bg_ct, pre_cid) {
-                        Ok((adapter_ptr, client)) => {
-                            let rt = get_pool_runtime();
-                            rt.spawn(async move {
-                                let mut pool = pool_clone.lock().await;
-                                if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
-                                    pool.release_reservation();
-                                    // Never stored in get_pool_clients(), so glide_pool_destroy cannot reclaim it.
-                                    drop_orphaned_adapter!(adapter_ptr);
-                                    return;
-                                }
-                                // Use pre_cid (allocated before lock) to match POOL_ADAPTER_MAP entry;
-                                // p.next_id() would generate a different ID, breaking the adapter lookup.
-                                let client_id = pre_cid as u64;
-                                let flag =
-                                    std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-                                let entry = PooledClient {
-                                    client_id,
-                                    client: client.clone(),
-                                    created_at: std::time::Instant::now(),
-                                    last_idle_at: std::time::Instant::now(),
-                                    borrowed_at: None,
-                                    state: ClientState::Idle,
-                                    is_blocking: flag.clone(),
-                                };
-                                pool.idle.push_back(entry);
-                                glide_core::pool::register_blocking_flag(client_id, flag);
-                                get_pool_clients().insert(
-                                    client_id,
-                                    PoolClientEntry {
-                                        adapter_ptr,
-                                        client,
+                std::thread::Builder::new()
+                    .stack_size(
+                        glide_core::client::configured_thread_stack_size()
+                            .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+                    )
+                    .spawn(move || {
+                        let pre_cid = glide_core::pool::allocate_client_id() as usize;
+                        let bg_ct = get_pool_client_types()
+                            .get(&pool_id)
+                            .map(|e| e.value().clone())
+                            .unwrap_or(ClientType::SyncClient);
+                        match create_pool_client(&bytes, bg_ct, pre_cid) {
+                            Ok((adapter_ptr, client)) => {
+                                let rt = get_pool_runtime();
+                                rt.spawn(async move {
+                                    let mut pool = pool_clone.lock().await;
+                                    if pool.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
+                                        pool.release_reservation();
+                                        // Never stored in get_pool_clients(), so glide_pool_destroy cannot reclaim it.
+                                        drop_orphaned_adapter!(adapter_ptr);
+                                        return;
+                                    }
+                                    // Use pre_cid (allocated before lock) to match POOL_ADAPTER_MAP entry;
+                                    // p.next_id() would generate a different ID, breaking the adapter lookup.
+                                    let client_id = pre_cid as u64;
+                                    let flag =
+                                        std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+                                    let entry = PooledClient {
+                                        client_id,
+                                        client: client.clone(),
                                         created_at: std::time::Instant::now(),
-                                    },
+                                        last_idle_at: std::time::Instant::now(),
+                                        borrowed_at: None,
+                                        state: ClientState::Idle,
+                                        is_blocking: flag.clone(),
+                                    };
+                                    pool.idle.push_back(entry);
+                                    glide_core::pool::register_blocking_flag(client_id, flag);
+                                    get_pool_clients().insert(
+                                        client_id,
+                                        PoolClientEntry {
+                                            adapter_ptr,
+                                            client,
+                                            created_at: std::time::Instant::now(),
+                                        },
+                                    );
+                                    get_pool_adapter_map()
+                                        .insert(adapter_ptr, (pool_id, client_id));
+                                });
+                            }
+                            Err(e) => {
+                                glide_logger::log_error_lazy!(
+                                    "pool",
+                                    format!("Background creation failed: {}", e)
                                 );
-                                get_pool_adapter_map().insert(adapter_ptr, (pool_id, client_id));
-                            });
+                                let rt = get_pool_runtime();
+                                rt.spawn(async move {
+                                    let mut pool = pool_clone.lock().await;
+                                    pool.release_reservation();
+                                });
+                            }
                         }
-                        Err(e) => {
-                            glide_logger::log_error_lazy!(
-                                "pool",
-                                format!("Background creation failed: {}", e)
-                            );
-                            let rt = get_pool_runtime();
-                            rt.spawn(async move {
-                                let mut pool = pool_clone.lock().await;
-                                pool.release_reservation();
-                            });
-                        }
-                    }
-                });
+                    })
+                    .expect("Failed to spawn GLIDE pool creation thread");
             }
             result
         }
@@ -515,65 +533,72 @@ pub extern "C" fn glide_pool_acquire_blocking(pool_id: u64, timeout_ms: u64) -> 
                     let pool_clone = pool_arc.clone();
                     let bytes = pool.config.connection_request.clone();
                     drop(pool);
-                    std::thread::spawn(move || {
-                        let pre_cid = glide_core::pool::allocate_client_id() as usize;
-                        let bg_ct = get_pool_client_types()
-                            .get(&pool_id)
-                            .map(|e| e.value().clone())
-                            .unwrap_or(ClientType::SyncClient);
-                        match create_pool_client(&bytes, bg_ct, pre_cid) {
-                            Ok((adapter_ptr, client)) => {
-                                // Spawn pool insertion as an async task instead of
-                                // block_on to avoid starving the pool runtime and
-                                // deadlocking with release_client_async.
-                                let rt = get_pool_runtime();
-                                rt.spawn(async move {
-                                    let mut p = pool_clone.lock().await;
-                                    if p.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
-                                        p.release_reservation();
-                                        // Never stored in get_pool_clients(), so glide_pool_destroy cannot reclaim it.
-                                        drop_orphaned_adapter!(adapter_ptr);
-                                        return;
-                                    }
-                                    // Use pre_cid (allocated before lock) to match POOL_ADAPTER_MAP entry;
-                                    // p.next_id() would generate a different ID, breaking the adapter lookup.
-                                    let cid = pre_cid as u64;
-                                    let flag =
-                                        std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-                                    let entry = PooledClient {
-                                        client_id: cid,
-                                        client: client.clone(),
-                                        created_at: std::time::Instant::now(),
-                                        last_idle_at: std::time::Instant::now(),
-                                        borrowed_at: None,
-                                        state: ClientState::Idle,
-                                        is_blocking: flag.clone(),
-                                    };
-                                    p.idle.push_back(entry);
-                                    glide_core::pool::register_blocking_flag(cid, flag);
-                                    get_pool_clients().insert(
-                                        cid,
-                                        PoolClientEntry {
-                                            adapter_ptr,
-                                            client,
+                    std::thread::Builder::new()
+                        .stack_size(
+                            glide_core::client::configured_thread_stack_size()
+                                .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+                        )
+                        .spawn(move || {
+                            let pre_cid = glide_core::pool::allocate_client_id() as usize;
+                            let bg_ct = get_pool_client_types()
+                                .get(&pool_id)
+                                .map(|e| e.value().clone())
+                                .unwrap_or(ClientType::SyncClient);
+                            match create_pool_client(&bytes, bg_ct, pre_cid) {
+                                Ok((adapter_ptr, client)) => {
+                                    // Spawn pool insertion as an async task instead of
+                                    // block_on to avoid starving the pool runtime and
+                                    // deadlocking with release_client_async.
+                                    let rt = get_pool_runtime();
+                                    rt.spawn(async move {
+                                        let mut p = pool_clone.lock().await;
+                                        if p.state.load(AtomicOrdering::Acquire) != POOL_RUNNING {
+                                            p.release_reservation();
+                                            // Never stored in get_pool_clients(), so glide_pool_destroy cannot reclaim it.
+                                            drop_orphaned_adapter!(adapter_ptr);
+                                            return;
+                                        }
+                                        // Use pre_cid (allocated before lock) to match POOL_ADAPTER_MAP entry;
+                                        // p.next_id() would generate a different ID, breaking the adapter lookup.
+                                        let cid = pre_cid as u64;
+                                        let flag = std::sync::Arc::new(
+                                            std::sync::atomic::AtomicU32::new(0),
+                                        );
+                                        let entry = PooledClient {
+                                            client_id: cid,
+                                            client: client.clone(),
                                             created_at: std::time::Instant::now(),
-                                        },
-                                    );
-                                    get_pool_adapter_map().insert(adapter_ptr, (pool_id, cid));
-                                    // Notify waiters that a new client is available
-                                    let (_, cv) = &*p.release_notify;
-                                    cv.notify_one();
-                                });
+                                            last_idle_at: std::time::Instant::now(),
+                                            borrowed_at: None,
+                                            state: ClientState::Idle,
+                                            is_blocking: flag.clone(),
+                                        };
+                                        p.idle.push_back(entry);
+                                        glide_core::pool::register_blocking_flag(cid, flag);
+                                        get_pool_clients().insert(
+                                            cid,
+                                            PoolClientEntry {
+                                                adapter_ptr,
+                                                client,
+                                                created_at: std::time::Instant::now(),
+                                            },
+                                        );
+                                        get_pool_adapter_map().insert(adapter_ptr, (pool_id, cid));
+                                        // Notify waiters that a new client is available
+                                        let (_, cv) = &*p.release_notify;
+                                        cv.notify_one();
+                                    });
+                                }
+                                Err(_) => {
+                                    let rt = get_pool_runtime();
+                                    rt.spawn(async move {
+                                        let mut p = pool_clone.lock().await;
+                                        p.release_reservation();
+                                    });
+                                }
                             }
-                            Err(_) => {
-                                let rt = get_pool_runtime();
-                                rt.spawn(async move {
-                                    let mut p = pool_clone.lock().await;
-                                    p.release_reservation();
-                                });
-                            }
-                        }
-                    });
+                        })
+                        .expect("Failed to spawn GLIDE pool creation thread");
                 }
                 r
             }

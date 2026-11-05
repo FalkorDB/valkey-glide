@@ -263,14 +263,22 @@ fn get_worker_pool_state() -> &'static PLMutex2<WorkerPoolState> {
 /// Acquire a reference to the worker pool, incrementing the client count.
 /// Creates the pool if it doesn't exist.
 /// Returns a clone of the LocalPoolHandle.
-fn acquire_worker_pool() -> LocalPoolHandle {
+fn acquire_worker_pool() -> Result<LocalPoolHandle> {
     let mut state = get_worker_pool_state().lock();
-    state.client_count += 1;
     if state.pool.is_none() {
+        if glide_core::client::configured_thread_stack_size()
+            < glide_core::client::MIN_RUNTIME_STACK_SIZE
+        {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "RUST_MIN_STACK must be at least 2097152 bytes before Rust threads start; the pinned worker pool cannot override its thread stacks",
+            ));
+        }
         let num_workers = num_cpus::get();
         state.pool = Some(LocalPoolHandle::new(num_workers));
     }
-    state.pool.as_ref().unwrap().clone()
+    state.client_count += 1;
+    Ok(state.pool.as_ref().unwrap().clone())
 }
 
 /// Release a reference to the worker pool, decrementing the client count.
@@ -1024,7 +1032,7 @@ pub(crate) async fn create_handle_for_client(
     let wake_tsfn_worker = Arc::downgrade(&wake_tsfn);
 
     // Acquire a worker-pool slot (released when the handle's message loop exits).
-    let worker_pool = acquire_worker_pool();
+    let worker_pool = acquire_worker_pool()?;
 
     let response_buffer_push = Arc::clone(&response_buffer);
     let wake_tsfn_push = Arc::downgrade(&wake_tsfn);
@@ -1606,7 +1614,14 @@ pub fn create_direct_client<'a>(
 
     // Acquire a reference to the worker pool (increments client count).
     // The pool will be released when the GlideClientHandle is dropped.
-    let worker_pool = acquire_worker_pool();
+    let worker_pool = match acquire_worker_pool() {
+        Ok(pool) => pool,
+        Err(error) => {
+            drop(credential_provider_claim);
+            deferred.reject(error);
+            return Ok(promise);
+        }
+    };
 
     // Create push notification channel for pub/sub
     let (push_sender, mut push_receiver) = mpsc::unbounded_channel::<PushInfo>();

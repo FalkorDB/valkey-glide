@@ -70,6 +70,40 @@ pub const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_millis(250);
 pub const DEFAULT_PERIODIC_TOPOLOGY_CHECKS_INTERVAL: Duration = Duration::from_secs(60);
 pub const FINISHED_SCAN_CURSOR: &str = "finished";
 
+/// Minimum native worker stack for bounded RESP/graph processing and destruction.
+pub const MIN_RUNTIME_STACK_SIZE: usize = 2 * 1024 * 1024;
+
+fn parse_thread_stack_size(value: &str) -> usize {
+    match value.parse() {
+        Ok(size) => size,
+        Err(error) => {
+            log_warn(
+                "thread stack",
+                format!("Invalid RUST_MIN_STACK ({error}); using the 2 MiB default"),
+            );
+            MIN_RUNTIME_STACK_SIZE
+        }
+    }
+}
+
+/// Read Rust's startup stack configuration, preserving larger requested stacks.
+///
+/// Owned runtime builders must clamp this to [`MIN_RUNTIME_STACK_SIZE`].
+/// Pinned pools without a stack-size API must reject a smaller configuration.
+pub fn configured_thread_stack_size() -> usize {
+    match std::env::var("RUST_MIN_STACK") {
+        Ok(value) => parse_thread_stack_size(&value),
+        Err(std::env::VarError::NotPresent) => MIN_RUNTIME_STACK_SIZE,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            log_warn(
+                "thread stack",
+                "Invalid non-Unicode RUST_MIN_STACK; using the 2 MiB default",
+            );
+            MIN_RUNTIME_STACK_SIZE
+        }
+    }
+}
+
 /// The value of 1000 for the maximum number of inflight requests is determined based on Little's Law in queuing theory:
 ///
 /// Expected maximum request rate: 50,000 requests/second
@@ -151,6 +185,7 @@ pub fn get_or_init_runtime() -> Result<&'static GlideRt, String> {
 
         let thread_handle = thread::Builder::new()
             .name("glide-runtime-thread".into())
+            .stack_size(configured_thread_stack_size().max(MIN_RUNTIME_STACK_SIZE))
             .spawn(move || {
                 match Builder::new_current_thread().enable_all().build() {
                     Ok(runtime) => {
@@ -4168,6 +4203,22 @@ mod tests {
         validate_effective_lib_name, validate_effective_lib_ver, validate_unix_socket_addresses,
     };
     use std::sync::{Arc, Weak};
+
+    #[test]
+    fn runtime_stack_configuration_preserves_large_values_and_rejects_bad_numbers() {
+        use super::{MIN_RUNTIME_STACK_SIZE, parse_thread_stack_size};
+
+        for size in [0, 64 * 1024, MIN_RUNTIME_STACK_SIZE, 4 * 1024 * 1024] {
+            assert_eq!(parse_thread_stack_size(&size.to_string()), size);
+            assert_eq!(
+                parse_thread_stack_size(&size.to_string()).max(MIN_RUNTIME_STACK_SIZE),
+                size.max(MIN_RUNTIME_STACK_SIZE)
+            );
+        }
+        for invalid in ["", "-1", "not-a-size", "184467440737095516160"] {
+            assert_eq!(parse_thread_stack_size(invalid), MIN_RUNTIME_STACK_SIZE);
+        }
+    }
 
     #[test]
     fn test_validate_effective_lib_name_accepts_supported_values() {

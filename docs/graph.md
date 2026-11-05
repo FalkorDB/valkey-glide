@@ -73,6 +73,24 @@ envelopes around those levels. The asynchronous wire decoder therefore uses a
 bounded 512-aggregate iterative builder, without recursive parser stack growth or
 changes to ordinary command response shapes.
 
+Nested Rust values still have recursive ordinary destruction. End-to-end deep
+processing requires **at least 2 MiB of native thread stack**, including result
+destruction and error/cancellation cleanup. GLIDE-owned runtime workers enforce
+this minimum and preserve larger `RUST_MIN_STACK` settings. Node's existing
+pinned-worker pool cannot override thread stacks, so creating it with an explicit
+smaller setting fails instead of starting unsupported workers. Configure
+`RUST_MIN_STACK` before any Rust threads start; changing it later is unsupported
+because Rust caches that setting.
+
+Externally owned/custom Tokio runtimes and synchronous foreign-caller threads
+are not resized: their owners must provide the same minimum. This also applies
+to the calling thread of Rust's blocking client. The 64 KiB wire-parser test
+checks iterative **construction only**, manually draining the result afterward;
+it is not a small-stack destruction guarantee. Separate 2 MiB regressions cover
+full graph decoding and ordinary destruction at the 128-level logical boundary,
+512-level mixed wire aggregates, malformed/partial frames, timeout and
+cancellation cleanup. Arbitrarily small stacks are not supported.
+
 Pass date/time/point/vector inputs as supported scalars or lists into Cypher
 constructors. Arbitrary native objects, graph entities, and native temporal
 objects are not implicitly serialized. Graph names and query text cannot contain
@@ -87,13 +105,15 @@ The optional graph server timeout is a nonnegative millisecond count within the
 server's signed 64-bit range. Zero keeps its server-defined meaning. It is
 also subject to the server's separately configured `TIMEOUT_MAX` limit. It is
 separate from the configured GLIDE client request timeout. One client deadline
-covers native adaptation and worker queueing, serialization, query execution, metadata reads, permitted redirects,
+covers native adaptation and worker queueing, core serialization, query execution, metadata reads, permitted redirects,
 compact decoding and canonical result encoding. Metadata does not get a fresh
 end-to-end budget. Native bridges capture the submission time before copying or
 parsing the request, rather than when a worker first polls it. An already-expired
 queued operation does not dispatch its graph command. Synchronous decoding cannot be preempted; if it finishes after
 the deadline, the operation returns the normal client timeout rather than a late
 success.
+Binding-side validation and protobuf request encoding occur before native
+submission and are outside this native request budget.
 
 ## Results
 

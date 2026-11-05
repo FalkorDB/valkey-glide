@@ -145,7 +145,10 @@ pub(crate) fn get_runtime() -> &'static Runtime {
             .max_blocking_threads(worker_threads * 2)
             .enable_all()
             .thread_name("glide-worker")
-            .thread_stack_size(2 * 1024 * 1024)
+            .thread_stack_size(
+                glide_core::client::configured_thread_stack_size()
+                    .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+            )
             .thread_keep_alive(std::time::Duration::from_secs(60))
             .build()
             .expect("Failed to create Tokio runtime")

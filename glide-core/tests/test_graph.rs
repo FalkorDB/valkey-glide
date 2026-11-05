@@ -55,6 +55,13 @@ async fn delayed_client() -> (Client, Arc<AtomicUsize>, tokio::task::JoinHandle<
 async fn delayed_client_with_timeout(
     request_timeout: u32,
 ) -> (Client, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    delayed_client_with_graph_response(request_timeout, None).await
+}
+
+async fn delayed_client_with_graph_response(
+    request_timeout: u32,
+    graph_response: Option<String>,
+) -> (Client, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
@@ -68,6 +75,7 @@ async fn delayed_client_with_timeout(
                 accepted = listener.accept() => {
                     let (mut socket, _) = accepted.unwrap();
                     let observed = observed.clone();
+                    let graph_response = graph_response.clone();
                     connections.spawn(async move {
                         let mut buffer = BytesMut::new();
                         let mut codec = ValueCodec::default();
@@ -96,6 +104,8 @@ async fn delayed_client_with_timeout(
                                         tokio::time::sleep(Duration::from_millis(150)).await;
                                         if name.as_ref() == b"GRAPH.RO_QUERY" {
                                             result(Value::Array(vec![Value::Int(2), text("Label")]))
+                                        } else if let Some(reply) = &graph_response {
+                                            reply.clone()
                                         } else if args[2] == text("RETURN n") {
                                             result(node())
                                         } else {
@@ -149,6 +159,121 @@ fn server(scripts: HashMap<String, Vec<String>>) -> ServerMock {
         ]),
         scripts,
     )
+}
+
+fn nested_graph_value(depth: usize, map: bool) -> Value {
+    let mut value = Value::Array(vec![Value::Int(1), Value::Nil]);
+    for _ in 0..depth {
+        value = Value::Array(vec![
+            Value::Int(if map { 10 } else { 6 }),
+            Value::Array(if map {
+                vec![text("k"), value]
+            } else {
+                vec![value]
+            }),
+        ]);
+    }
+    value
+}
+
+#[test]
+fn graph_decode_and_cleanup_use_the_supported_worker_stack() {
+    use glide_core::client::MIN_RUNTIME_STACK_SIZE;
+
+    std::thread::Builder::new()
+        .stack_size(MIN_RUNTIME_STACK_SIZE)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_stack_size(MIN_RUNTIME_STACK_SIZE)
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                tokio::spawn(async {
+                    for map in [false, true] {
+                        for depth in [127, 128, 129] {
+                            let reply = result(nested_graph_value(depth, map));
+                            let mock = server(HashMap::from([("GRAPH.QUERY".into(), vec![reply])]));
+                            let client = client(&mock).await;
+                            let graph =
+                                GraphContext::new(client.clone(), "graph".into(), 0).unwrap();
+                            let decoded = graph
+                                .query("RETURN deep", &GraphQueryOptions::default())
+                                .await;
+                            assert_eq!(decoded.is_ok(), depth <= 128);
+                            if let Ok(decoded) = decoded {
+                                assert_eq!(decoded.rows.len(), 1);
+                                let mut value = &decoded.rows[0][0];
+                                for _ in 0..depth {
+                                    value = match value {
+                                        GraphValue::List(items) => {
+                                            assert!(!map);
+                                            assert_eq!(items.len(), 1);
+                                            &items[0]
+                                        }
+                                        GraphValue::Map(items) => {
+                                            assert!(map);
+                                            assert_eq!(items.len(), 1);
+                                            items.iter().map(|(_, value)| value).next().unwrap()
+                                        }
+                                        other => panic!("unexpected nested graph value: {other:?}"),
+                                    };
+                                }
+                                assert_eq!(value, &GraphValue::Null);
+                                drop(decoded);
+                            }
+                            drop(graph);
+                            drop(client);
+                            mock.close().await;
+                        }
+                    }
+                    for cancel in [false, true] {
+                        let reply = result(Value::Array(vec![
+                            Value::Int(6),
+                            Value::Array(vec![node(), nested_graph_value(126, false)]),
+                        ]));
+                        let (mut client, observed, server) = delayed_client_with_graph_response(
+                            if cancel { 1000 } else { 250 },
+                            Some(reply),
+                        )
+                        .await;
+                        let graph = GraphContext::new(client.clone(), "graph".into(), 0).unwrap();
+                        let operation = tokio::spawn(async move {
+                            graph
+                                .query("RETURN deep", &GraphQueryOptions::default())
+                                .await
+                        });
+                        if cancel {
+                            tokio::time::timeout(Duration::from_secs(2), async {
+                                while observed.load(Ordering::Acquire) < 2 {
+                                    tokio::time::sleep(Duration::from_millis(1)).await;
+                                }
+                            })
+                            .await
+                            .unwrap();
+                            operation.abort();
+                            assert!(operation.await.unwrap_err().is_cancelled());
+                        } else {
+                            assert!(operation.await.unwrap().unwrap_err().is_timeout());
+                        }
+                        assert_eq!(observed.load(Ordering::Acquire), 2);
+                        client
+                            .send_command(redis::cmd("SELECT").arg(0), None)
+                            .await
+                            .unwrap();
+                        drop(client);
+                        server.abort();
+                        assert!(server.await.unwrap_err().is_cancelled());
+                    }
+                })
+                .await
+                .unwrap();
+            });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 async fn delayed_byte_bridge_poll(retained: bool) {

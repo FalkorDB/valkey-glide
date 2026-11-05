@@ -2618,6 +2618,10 @@ fn create_client_internal(
                 .max(1);
             Builder::new_multi_thread()
                 .enable_all()
+                .thread_stack_size(
+                    glide_core::client::configured_thread_stack_size()
+                        .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+                )
                 .worker_threads(worker_threads)
                 .thread_name("Valkey-GLIDE thread")
                 .build()
@@ -2636,6 +2640,10 @@ fn create_client_internal(
         ClientType::SyncClient => Some(
             Builder::new_multi_thread()
                 .enable_all()
+                .thread_stack_size(
+                    glide_core::client::configured_thread_stack_size()
+                        .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+                )
                 .worker_threads(1)
                 .thread_name("Valkey-GLIDE background")
                 .build()
@@ -8106,7 +8114,14 @@ pub unsafe extern "C-unwind" fn create_monitor_client(
         cache: None,
     };
 
-    let runtime = match Builder::new_multi_thread().enable_all().build() {
+    let runtime = match Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(
+            glide_core::client::configured_thread_stack_size()
+                .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+        )
+        .build()
+    {
         Ok(r) => r,
         Err(e) => {
             let err_msg =

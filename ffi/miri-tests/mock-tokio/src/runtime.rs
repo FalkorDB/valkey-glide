@@ -111,6 +111,10 @@ impl Builder {
         self
     }
 
+    pub fn thread_stack_size(&mut self, _val: usize) -> &mut Self {
+        self
+    }
+
     pub fn thread_name(&mut self, _val: impl Into<String>) -> &mut Self {
         self
     }

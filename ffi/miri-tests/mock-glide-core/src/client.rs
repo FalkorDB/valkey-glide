@@ -1,6 +1,8 @@
 // Copyright Valkey GLIDE Project Contributors - SPDX Identifier: Apache-2.0
 
-pub use glide_core::client::{GlideRt, get_or_init_runtime};
+pub use glide_core::client::{
+    GlideRt, MIN_RUNTIME_STACK_SIZE, configured_thread_stack_size, get_or_init_runtime,
+};
 
 /// Mirrors glide_core::client::NodeAddress (internal type, not protobuf).
 pub struct NodeAddress {
