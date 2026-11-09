@@ -40,7 +40,9 @@ pub use types::*;
 
 use self::value_conversion::{convert_to_expected_type, expected_type_for_cmd, get_value_type};
 mod dispatch_permit;
+mod graph;
 use dispatch_permit::{Admission, DispatchPermit};
+use graph::GraphConnection;
 #[cfg(feature = "rdma")]
 mod rdma;
 #[cfg(feature = "rdma")]
@@ -67,6 +69,40 @@ pub const DEFAULT_RETRIES: u32 = 3;
 pub const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_millis(250);
 pub const DEFAULT_PERIODIC_TOPOLOGY_CHECKS_INTERVAL: Duration = Duration::from_secs(60);
 pub const FINISHED_SCAN_CURSOR: &str = "finished";
+
+/// Minimum native worker stack for bounded RESP/graph processing and destruction.
+pub const MIN_RUNTIME_STACK_SIZE: usize = 2 * 1024 * 1024;
+
+fn parse_thread_stack_size(value: &str) -> usize {
+    match value.parse() {
+        Ok(size) => size,
+        Err(error) => {
+            log_warn(
+                "thread stack",
+                format!("Invalid RUST_MIN_STACK ({error}); using the 2 MiB default"),
+            );
+            MIN_RUNTIME_STACK_SIZE
+        }
+    }
+}
+
+/// Read Rust's startup stack configuration, preserving larger requested stacks.
+///
+/// Owned runtime builders must clamp this to [`MIN_RUNTIME_STACK_SIZE`].
+/// Pinned pools without a stack-size API must reject a smaller configuration.
+pub fn configured_thread_stack_size() -> usize {
+    match std::env::var("RUST_MIN_STACK") {
+        Ok(value) => parse_thread_stack_size(&value),
+        Err(std::env::VarError::NotPresent) => MIN_RUNTIME_STACK_SIZE,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            log_warn(
+                "thread stack",
+                "Invalid non-Unicode RUST_MIN_STACK; using the 2 MiB default",
+            );
+            MIN_RUNTIME_STACK_SIZE
+        }
+    }
+}
 
 /// The value of 1000 for the maximum number of inflight requests is determined based on Little's Law in queuing theory:
 ///
@@ -149,6 +185,7 @@ pub fn get_or_init_runtime() -> Result<&'static GlideRt, String> {
 
         let thread_handle = thread::Builder::new()
             .name("glide-runtime-thread".into())
+            .stack_size(configured_thread_stack_size().max(MIN_RUNTIME_STACK_SIZE))
             .spawn(move || {
                 match Builder::new_current_thread().enable_all().build() {
                     Ok(runtime) => {
@@ -508,6 +545,10 @@ pub struct ClientShared {
     // Tracks the current database selected at runtime (updated on SELECT commands).
     // Used by scope connections to inherit the parent's current database.
     current_database: Arc<AtomicU32>,
+    graph_database_epoch: AtomicU64,
+    // Graph queries share a lease through metadata resolution; database and
+    // raw transaction state changes take the exclusive lease.
+    graph_state_lock: RwLock<()>,
     // Set before dispatching any SELECT-bearing command (single or batch); cleared
     // only by a successful release reset. `current_database` can under-report the
     // live db — a SELECT can apply on the connection even when the call errors or
@@ -856,6 +897,9 @@ impl Client {
         self.shared
             .current_database
             .store(database_id as u32, Ordering::Release);
+        self.shared
+            .graph_database_epoch
+            .fetch_and(!1, Ordering::AcqRel);
         Ok(())
     }
 
@@ -1158,7 +1202,8 @@ impl Client {
     }
 
     fn is_reset_command(&self, cmd: &Cmd) -> bool {
-        cmd.command().is_some_and(|bytes| bytes == b"RESET")
+        cmd.arg_idx(0)
+            .is_some_and(|bytes| bytes.eq_ignore_ascii_case(b"RESET"))
     }
 
     async fn handle_reset_command(&mut self) -> RedisResult<()> {
@@ -1196,7 +1241,11 @@ impl Client {
         // RESET returns the connection to db 0; keep the drift signal the pool
         // release check reads (`current_database`) in sync, not just the resync db.
         self.shared.current_database.store(0, Ordering::Release);
+        self.shared
+            .graph_database_epoch
+            .fetch_and(!1, Ordering::AcqRel);
         self.update_stored_client_name(None).await?;
+        self.shared.multi_active.store(false, Ordering::Release);
         self.update_stored_protocol(redis::ProtocolVersion::RESP2)
             .await?;
         Arc::make_mut(&mut self.otel_metadata).db_namespace = "0".to_string();
@@ -1307,35 +1356,63 @@ impl Client {
         routing: Option<RoutingInfo>,
         client: ClientWrapper,
         compression_manager: Option<Arc<CompressionManager>>,
+        affinity: Option<GraphConnection>,
     ) -> RedisResult<Value> {
-        let raw_value = match client {
-            ClientWrapper::Standalone(mut client) => client.send_command(&cmd).await,
-            ClientWrapper::Cluster { mut client, .. } => {
-                let final_routing = if let Some(RoutingInfo::SingleNode(
-                    SingleNodeRoutingInfo::Random,
-                )) = routing
-                {
-                    let cmd_name = cmd.command().unwrap_or_default();
-                    let cmd_name = String::from_utf8_lossy(&cmd_name);
-                    if redis::cluster_routing::is_readonly_cmd(cmd_name.as_bytes()) {
-                        RoutingInfo::SingleNode(SingleNodeRoutingInfo::Random)
-                    } else {
-                        log_warn(
-                            "send_command",
-                            format!(
-                                "User provided 'Random' routing which is not suitable for the writeable command '{cmd_name}'. Changing it to 'RandomPrimary'"
-                            ),
-                        );
-                        RoutingInfo::SingleNode(SingleNodeRoutingInfo::RandomPrimary)
-                    }
-                } else {
-                    routing
-                        .or_else(|| RoutingInfo::for_routable(cmd.as_ref()))
-                        .unwrap_or(RoutingInfo::SingleNode(SingleNodeRoutingInfo::Random))
-                };
-                client.route_command(&cmd, final_routing).await
+        let raw_value = if let Some(GraphConnection {
+            mut connection,
+            asking,
+        }) = affinity
+        {
+            if asking {
+                let mut pipeline = redis::pipe();
+                pipeline
+                    .cmd("ASKING")
+                    .ignore()
+                    .add_command(cmd.as_ref().clone());
+                connection
+                    .req_packed_commands(&pipeline, 1, 1, None)
+                    .await
+                    .and_then(|mut replies| {
+                        replies.pop().ok_or_else(|| {
+                            RedisError::from((
+                                ErrorKind::ResponseError,
+                                "Missing graph ASK response",
+                            ))
+                        })
+                    })
+            } else {
+                connection.send_packed_command(&cmd).await
             }
-            ClientWrapper::Lazy(_) => unreachable!("Lazy client should have been initialized"),
+        } else {
+            match client {
+                ClientWrapper::Standalone(mut client) => client.send_command(&cmd).await,
+                ClientWrapper::Cluster { mut client, .. } => {
+                    let final_routing = if let Some(RoutingInfo::SingleNode(
+                        SingleNodeRoutingInfo::Random,
+                    )) = routing
+                    {
+                        let cmd_name = cmd.command().unwrap_or_default();
+                        let cmd_name = String::from_utf8_lossy(&cmd_name);
+                        if redis::cluster_routing::is_readonly_cmd(cmd_name.as_bytes()) {
+                            RoutingInfo::SingleNode(SingleNodeRoutingInfo::Random)
+                        } else {
+                            log_warn(
+                                "send_command",
+                                format!(
+                                    "User provided 'Random' routing which is not suitable for the writeable command '{cmd_name}'. Changing it to 'RandomPrimary'"
+                                ),
+                            );
+                            RoutingInfo::SingleNode(SingleNodeRoutingInfo::RandomPrimary)
+                        }
+                    } else {
+                        routing
+                            .or_else(|| RoutingInfo::for_routable(cmd.as_ref()))
+                            .unwrap_or(RoutingInfo::SingleNode(SingleNodeRoutingInfo::Random))
+                    };
+                    client.route_command(&cmd, final_routing).await
+                }
+                ClientWrapper::Lazy(_) => unreachable!("Lazy client should have been initialized"),
+            }
         }?;
 
         // Post-process: decompress and convert to expected type.
@@ -1378,7 +1455,7 @@ impl Client {
         if self_clone.is_client_set_name_command(&cmd) {
             self_clone.handle_client_set_name_command(&cmd).await?;
         }
-        if self_clone.is_select_command(&cmd) {
+        if self_clone.is_select_command(&cmd) && value == Value::Okay {
             self_clone.handle_select_command(&cmd).await?;
         }
         if self_clone.is_auth_command(&cmd) {
@@ -1387,7 +1464,9 @@ impl Client {
         if self_clone.is_hello_command(&cmd) {
             self_clone.handle_hello_command(&cmd).await?;
         }
-        if self_clone.is_reset_command(&cmd) {
+        if self_clone.is_reset_command(&cmd)
+            && matches!(&value, Value::SimpleString(reply) if reply == "RESET")
+        {
             self_clone.handle_reset_command().await?;
         }
         Ok(value)
@@ -1403,6 +1482,12 @@ impl Client {
         Box::pin(async move {
             // `BLOB.*` transfers lend a buffer, so only the rdma methods send them.
             crate::rdma::refuse_direct_command(cmd)?;
+            let shared = self.shared.clone();
+            let _graph_state = if Self::changes_graph_connection_state(cmd) {
+                Some(shared.graph_state_lock.write().await)
+            } else {
+                None
+            };
             // Refresh IAM auth before the command (see `reconcile_iam_before_dispatch`).
             self.reconcile_iam_before_dispatch().await?;
             // Track MULTI/EXEC/DISCARD for the borrow-time re-AUTH defer.
@@ -1411,6 +1496,9 @@ impl Client {
             // Flag a possible db change before dispatch (see `db_maybe_dirty`).
             if self.is_select_command(cmd) {
                 self.shared.db_maybe_dirty.store(true, Ordering::Release);
+                self.mark_graph_database_dirty();
+            } else if self.is_reset_command(cmd) {
+                self.mark_graph_database_dirty();
             }
             self.send_command_ungated(cmd, routing).await
         })
@@ -1434,7 +1522,7 @@ impl Client {
         }
 
         let permit = admission.reserve(self)?;
-        self.dispatch(permit, cmd, routing).await
+        self.dispatch(permit, cmd, routing, None).await
     }
 
     /// Send `cmd` with the client and in-flight slot in `permit`.
@@ -1448,6 +1536,7 @@ impl Client {
         permit: DispatchPermit,
         cmd: &'a mut Cmd,
         routing: Option<RoutingInfo>,
+        affinity: Option<GraphConnection>,
     ) -> RedisResult<Value> {
         let (client, tracker) = permit.into_parts();
         let request_timeout = get_request_timeout(cmd, self.request_timeout)?;
@@ -1524,6 +1613,7 @@ impl Client {
                     routing,
                     client,
                     compression_manager,
+                    affinity,
                 );
 
                 tokio::pin!(execute);
@@ -1628,6 +1718,7 @@ impl Client {
                     routing,
                     client,
                     compression_manager,
+                    affinity,
                 );
                 execute.await
             }
@@ -2020,13 +2111,7 @@ impl Client {
         }
     }
 
-    fn get_transaction_values(
-        pipeline: &redis::Pipeline,
-        mut values: Vec<Value>,
-        command_count: usize,
-        offset: usize,
-        raise_on_error: bool,
-    ) -> RedisResult<Value> {
+    fn get_transaction_values(mut values: Vec<Value>, offset: usize) -> RedisResult<Value> {
         assert_eq!(values.len(), 1);
         let value = values.pop();
         let values = match value {
@@ -2054,12 +2139,7 @@ impl Client {
                     .into());
             }
         };
-        Self::convert_pipeline_values_to_expected_types(
-            pipeline,
-            values,
-            command_count,
-            raise_on_error,
-        )
+        Ok(Value::Array(values))
     }
 
     fn convert_pipeline_values_to_expected_types(
@@ -2093,6 +2173,25 @@ impl Client {
         Ok(Value::Array(values))
     }
 
+    async fn reconcile_and_convert_batch(
+        &mut self,
+        pipeline: &redis::Pipeline,
+        result: RedisResult<Value>,
+        command_count: usize,
+        raise_on_error: bool,
+    ) -> RedisResult<Value> {
+        self.reconcile_batch_database(pipeline, &result).await?;
+        match result? {
+            Value::Array(values) => Self::convert_pipeline_values_to_expected_types(
+                pipeline,
+                values,
+                command_count,
+                raise_on_error,
+            ),
+            value => Ok(value),
+        }
+    }
+
     /// Send a pipeline to the server.
     /// Transaction is a batch of commands that are sent in a single request.
     /// Unlike a pipelines, transactions are atomic, and in cluster mode, the key-based commands must route to the same slot.
@@ -2105,6 +2204,15 @@ impl Client {
     ) -> redis::RedisFuture<'a, Value> {
         Box::pin(async move {
             crate::rdma::refuse_direct_in_batch(pipeline)?;
+            let shared = self.shared.clone();
+            let _graph_state = if pipeline
+                .cmd_iter()
+                .any(|cmd| Self::changes_graph_connection_state(cmd))
+            {
+                Some(shared.graph_state_lock.write().await)
+            } else {
+                None
+            };
             self.reconcile_iam_before_dispatch().await?;
             // Capture the batch's last SELECT now; apply it after dispatch if the
             // reply shows the server took it, and flag a possible db change (see
@@ -2114,8 +2222,13 @@ impl Client {
                 self.track_subscription(cmd);
             }
             let drifted_db = self.last_select_db(pipeline);
+            let has_reset = pipeline.cmd_iter().any(|cmd| self.is_reset_command(cmd));
+            if has_reset {
+                self.mark_graph_database_dirty();
+            }
             if drifted_db.is_some() {
                 self.shared.db_maybe_dirty.store(true, Ordering::Release);
+                self.mark_graph_database_dirty();
             }
             let client = self.get_or_initialize_client().await?;
             let command_count = pipeline.cmd_iter().count();
@@ -2126,19 +2239,13 @@ impl Client {
             // which is an array containing the results of all the commands in the pipeline.
             let offset = command_count + 1;
 
-            let result = run_with_timeout(
+            run_with_timeout(
                 Some(to_duration(transaction_timeout, self.request_timeout)),
                 async move {
-                    match client {
+                    let result = match client {
                         ClientWrapper::Standalone(mut client) => {
                             let values = client.send_pipeline(pipeline, offset, 1).await?;
-                            Client::get_transaction_values(
-                                pipeline,
-                                values,
-                                command_count,
-                                offset,
-                                raise_on_error,
-                            )
+                            Client::get_transaction_values(values, offset)
                         }
                         ClientWrapper::Cluster { mut client, .. } => {
                             let values = match routing {
@@ -2153,29 +2260,22 @@ impl Client {
                                         .await?
                                 }
                             };
-                            Client::get_transaction_values(
-                                pipeline,
-                                values,
-                                command_count,
-                                offset,
-                                raise_on_error,
-                            )
+                            Client::get_transaction_values(values, offset)
                         }
                         ClientWrapper::Lazy(_) => {
                             unreachable!("Lazy client should have been initialized")
                         }
-                    }
+                    };
+                    self.reconcile_and_convert_batch(
+                        pipeline,
+                        result,
+                        command_count,
+                        raise_on_error,
+                    )
+                    .await
                 },
             )
-            .await;
-            // Record the drift only if the SELECT reply applied (see
-            // `batch_reply_applied`).
-            if let Some((idx, db)) = drifted_db
-                && Self::batch_reply_applied(&result, idx)
-            {
-                self.apply_batch_select_db(db).await;
-            }
-            result
+            .await
         })
     }
 
@@ -2202,6 +2302,15 @@ impl Client {
     ) -> redis::RedisFuture<'a, Value> {
         Box::pin(async move {
             crate::rdma::refuse_direct_in_batch(pipeline)?;
+            let shared = self.shared.clone();
+            let _graph_state = if pipeline
+                .cmd_iter()
+                .any(|cmd| Self::changes_graph_connection_state(cmd))
+            {
+                Some(shared.graph_state_lock.write().await)
+            } else {
+                None
+            };
             self.reconcile_iam_before_dispatch().await?;
             // A raw MULTI stays open after a non-atomic pipeline returns, so track
             // it pre-dispatch for `prepare_for_borrow`'s defer. The SELECT drift is
@@ -2211,8 +2320,13 @@ impl Client {
                 self.track_subscription(cmd);
             }
             let drifted_db = self.last_select_db(pipeline);
+            let has_reset = pipeline.cmd_iter().any(|cmd| self.is_reset_command(cmd));
+            if has_reset {
+                self.mark_graph_database_dirty();
+            }
             if drifted_db.is_some() {
                 self.shared.db_maybe_dirty.store(true, Ordering::Release);
+                self.mark_graph_database_dirty();
             }
             let client = self.get_or_initialize_client().await?;
 
@@ -2224,7 +2338,7 @@ impl Client {
                 )));
             }
 
-            let result = run_with_timeout(
+            run_with_timeout(
                 Some(to_duration(pipeline_timeout, self.request_timeout)),
                 async move {
                     let values = match client {
@@ -2261,23 +2375,16 @@ impl Client {
                         }
                     }?;
 
-                    Client::convert_pipeline_values_to_expected_types(
+                    self.reconcile_and_convert_batch(
                         pipeline,
-                        values,
+                        Ok(Value::Array(values)),
                         command_count,
                         raise_on_error,
                     )
+                    .await
                 },
             )
-            .await;
-            // Record the drift only if the SELECT reply applied (see
-            // `batch_reply_applied`).
-            if let Some((idx, db)) = drifted_db
-                && Self::batch_reply_applied(&result, idx)
-            {
-                self.apply_batch_select_db(db).await;
-            }
-            result
+            .await
         })
     }
 
@@ -3368,6 +3475,8 @@ impl Client {
                         ))
                     }),
                     current_database: Arc::new(AtomicU32::new(request.database_id as u32)),
+                    graph_database_epoch: AtomicU64::new(0),
+                    graph_state_lock: RwLock::new(()),
                     db_maybe_dirty: Arc::new(AtomicBool::new(false)),
                     subscribe_sent: Arc::new(AtomicBool::new(false)),
                     last_iam_generation: Arc::new(AtomicU64::new(0)),
@@ -3691,8 +3800,7 @@ impl Client {
         self.is_pool_managed.store(true, Ordering::Release);
     }
 
-    /// Whether this client has been marked pool-managed (test/introspection helper).
-    #[cfg(test)]
+    /// Whether this client is owned by a pool and must not escape a lease.
     pub(crate) fn is_pool_managed(&self) -> bool {
         self.is_pool_managed.load(Ordering::Acquire)
     }
@@ -3734,12 +3842,7 @@ impl Client {
     /// [`batch_reply_applied`](Self::batch_reply_applied) to record the drift only
     /// if the server applied it. A pure read; never mutates db state.
     ///
-    /// Only `SELECT` is tracked, not `RESET` (which also returns the connection to
-    /// db 0). A batch like `[SELECT 3, RESET]` therefore records db 3 while the live
-    /// connection is on db 0, leaving non-pooled scope/reconnect metadata stale.
-    /// Pooled release is unaffected — `db_maybe_dirty` forces the reset `SELECT`
-    /// regardless — and a `RESET` inside a pooled borrow is an unusual pattern, so
-    /// the narrow non-pooled gap is left as a known limitation rather than tracked.
+    /// RESET is reconciled separately, in reply order, after dispatch.
     fn last_select_db(&self, pipeline: &redis::Pipeline) -> Option<(usize, u32)> {
         pipeline
             .cmd_iter()
@@ -3753,19 +3856,60 @@ impl Client {
             .last()
     }
 
-    /// Record a batch `SELECT`'s db, mirroring the single-command
-    /// `handle_select_command` so all three db trackers stay in step: the reconnect
-    /// db (`update_stored_database_id`), the OTel `db_namespace`, and
-    /// `current_database` (read by scope connections).
-    async fn apply_batch_select_db(&mut self, db: u32) {
-        if let Err(e) = self.update_stored_database_id(db as i64).await {
+    async fn reconcile_batch_database(
+        &mut self,
+        pipeline: &redis::Pipeline,
+        result: &RedisResult<Value>,
+    ) -> RedisResult<()> {
+        let Ok(Value::Array(values)) = result else {
+            return Ok(());
+        };
+        if !pipeline.cmd_iter().any(|cmd| self.is_reset_command(cmd)) {
+            if let Some((index, database)) = self.last_select_db(pipeline)
+                && Self::batch_reply_applied(result, index)
+            {
+                self.apply_batch_select_db(database).await;
+            }
+            return Ok(());
+        }
+        let mut last_change_confirmed = true;
+        for (index, command) in pipeline.cmd_iter().enumerate() {
+            if self.is_select_command(command) {
+                last_change_confirmed = Self::batch_reply_applied(result, index);
+                if last_change_confirmed {
+                    self.handle_select_command(command).await?;
+                }
+            } else if self.is_reset_command(command) {
+                last_change_confirmed = matches!(
+                    values.get(index),
+                    Some(Value::SimpleString(reply)) if reply == "RESET"
+                );
+                if last_change_confirmed {
+                    self.handle_reset_command().await?;
+                }
+            }
+        }
+        if !last_change_confirmed {
+            self.mark_graph_database_dirty();
+        }
+        Ok(())
+    }
+
+    async fn apply_batch_select_db(&mut self, database: u32) {
+        if let Err(error) = self.update_stored_database_id(database as i64).await {
             log_warn(
                 "apply_batch_select_db",
-                format!("failed to update reconnect database to {db}: {e}"),
+                format!("failed to update reconnect database to {database}: {error}"),
             );
+        } else {
+            self.shared
+                .graph_database_epoch
+                .fetch_and(!1, Ordering::AcqRel);
         }
-        Arc::make_mut(&mut self.otel_metadata).db_namespace = db.to_string();
-        self.shared.current_database.store(db, Ordering::Release);
+        Arc::make_mut(&mut self.otel_metadata).db_namespace = database.to_string();
+        self.shared
+            .current_database
+            .store(database, Ordering::Release);
     }
 
     /// Whether the `SELECT` at `idx` in the batch actually executed. An executed
@@ -3975,6 +4119,8 @@ impl Client {
                 latency_tracker: Arc::new(crate::timeout_watchdog::LatencyTracker::new(64)),
                 circuit_breaker: None,
                 current_database: Arc::new(AtomicU32::new(0)),
+                graph_database_epoch: AtomicU64::new(0),
+                graph_state_lock: RwLock::new(()),
                 db_maybe_dirty: Arc::new(AtomicBool::new(false)),
                 subscribe_sent: Arc::new(AtomicBool::new(false)),
                 last_iam_generation: Arc::new(AtomicU64::new(0)),
@@ -4058,6 +4204,8 @@ pub fn create_test_glide_client() -> Client {
             latency_tracker: Arc::new(crate::timeout_watchdog::LatencyTracker::new(64)),
             circuit_breaker: None,
             current_database: Arc::new(AtomicU32::new(0)),
+            graph_database_epoch: AtomicU64::new(0),
+            graph_state_lock: RwLock::new(()),
             db_maybe_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             subscribe_sent: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_iam_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -4106,6 +4254,22 @@ mod tests {
         validate_effective_lib_name, validate_effective_lib_ver, validate_unix_socket_addresses,
     };
     use std::sync::{Arc, Weak};
+
+    #[test]
+    fn runtime_stack_configuration_preserves_large_values_and_rejects_bad_numbers() {
+        use super::{MIN_RUNTIME_STACK_SIZE, parse_thread_stack_size};
+
+        for size in [0, 64 * 1024, MIN_RUNTIME_STACK_SIZE, 4 * 1024 * 1024] {
+            assert_eq!(parse_thread_stack_size(&size.to_string()), size);
+            assert_eq!(
+                parse_thread_stack_size(&size.to_string()).max(MIN_RUNTIME_STACK_SIZE),
+                size.max(MIN_RUNTIME_STACK_SIZE)
+            );
+        }
+        for invalid in ["", "-1", "not-a-size", "184467440737095516160"] {
+            assert_eq!(parse_thread_stack_size(invalid), MIN_RUNTIME_STACK_SIZE);
+        }
+    }
 
     #[test]
     fn test_validate_effective_lib_name_accepts_supported_values() {
@@ -5017,6 +5181,8 @@ mod tests {
                 latency_tracker: Arc::new(crate::timeout_watchdog::LatencyTracker::new(64)),
                 circuit_breaker: None,
                 current_database: Arc::new(AtomicU32::new(0)),
+                graph_database_epoch: AtomicU64::new(0),
+                graph_state_lock: RwLock::new(()),
                 db_maybe_dirty: Arc::new(AtomicBool::new(false)),
                 subscribe_sent: Arc::new(AtomicBool::new(false)),
                 last_iam_generation: Arc::new(AtomicU64::new(0)),
@@ -6151,7 +6317,7 @@ mod tests {
 
         let mut sent = redis::cmd("SET");
         sent.arg("key").arg("value");
-        let reply = client.dispatch(permit, &mut sent, None).await;
+        let reply = client.dispatch(permit, &mut sent, None, None).await;
         assert_eq!(reply, Ok(redis::Value::Okay));
     }
 

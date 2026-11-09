@@ -248,6 +248,7 @@ class AsyncClientPool:
             client = object.__new__(ClientClass)
             client.config = self._client_config
             client._is_closed = False
+            client._graph_pool_managed = True
             client._ffi = self._ffi
             client._lib = self._lib
             client._pending_futures = {}

@@ -263,14 +263,22 @@ fn get_worker_pool_state() -> &'static PLMutex2<WorkerPoolState> {
 /// Acquire a reference to the worker pool, incrementing the client count.
 /// Creates the pool if it doesn't exist.
 /// Returns a clone of the LocalPoolHandle.
-fn acquire_worker_pool() -> LocalPoolHandle {
+fn acquire_worker_pool() -> Result<LocalPoolHandle> {
     let mut state = get_worker_pool_state().lock();
-    state.client_count += 1;
     if state.pool.is_none() {
+        if glide_core::client::configured_thread_stack_size()
+            < glide_core::client::MIN_RUNTIME_STACK_SIZE
+        {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "RUST_MIN_STACK must be at least 2097152 bytes before Rust threads start; the pinned worker pool cannot override its thread stacks",
+            ));
+        }
         let num_workers = num_cpus::get();
         state.pool = Some(LocalPoolHandle::new(num_workers));
     }
-    state.pool.as_ref().unwrap().clone()
+    state.client_count += 1;
+    Ok(state.pool.as_ref().unwrap().clone())
 }
 
 /// Release a reference to the worker pool, decrementing the client count.
@@ -316,7 +324,7 @@ impl Drop for UnmarkOnDrop {
 }
 
 /// Message sent from NAPI thread to pinned worker thread for command execution.
-/// Kept minimal to reduce per-command overhead - no Arc cloning per message.
+/// Ordinary commands avoid per-message Arc cloning; graph requests retain their context.
 enum WorkerMessage {
     /// Single command execution
     Command(SingleCommandMessage),
@@ -332,6 +340,13 @@ enum WorkerMessage {
     RefreshIamToken(RefreshIamTokenMessage),
     /// Get client-side cache metrics
     GetCacheMetrics(GetCacheMetricsMessage),
+    /// Typed graph request, independent of the normal command request enum.
+    GraphQuery {
+        callback_idx: u32,
+        request: Vec<u8>,
+        context: Arc<glide_core::graph::GraphContext>,
+        submitted_at: tokio::time::Instant,
+    },
 }
 
 struct SingleCommandMessage {
@@ -1017,7 +1032,7 @@ pub(crate) async fn create_handle_for_client(
     let wake_tsfn_worker = Arc::downgrade(&wake_tsfn);
 
     // Acquire a worker-pool slot (released when the handle's message loop exits).
-    let worker_pool = acquire_worker_pool();
+    let worker_pool = acquire_worker_pool()?;
 
     let response_buffer_push = Arc::clone(&response_buffer);
     let wake_tsfn_push = Arc::downgrade(&wake_tsfn);
@@ -1124,6 +1139,32 @@ fn run_worker_message(
     wake_tsfn_worker: &std::sync::Weak<ThreadsafeFunction<(), (), (), Status, false>>,
 ) {
     match msg {
+        WorkerMessage::GraphQuery {
+            callback_idx,
+            request,
+            context,
+            submitted_at,
+        } => {
+            let inflight = Arc::clone(worker_inflight);
+            let buffer = Arc::clone(response_buffer_worker);
+            let wake = wake_tsfn_worker.clone();
+            task::spawn_local(async move {
+                let result = glide_core::graph::execute_request_with_context_at(
+                    context.as_ref().clone(),
+                    Ok(request),
+                    submitted_at,
+                )
+                .await;
+                drop(context);
+                let response = build_response(callback_idx, result, None);
+                inflight.fetch_add(1, Ordering::Release);
+                if buffer.push(response)
+                    && let Some(callback) = wake.upgrade()
+                {
+                    callback.call((), ThreadsafeFunctionCallMode::NonBlocking);
+                }
+            });
+        }
         WorkerMessage::Command(cmd_msg) => {
             let mut client_clone = client.clone();
             let mut cmd = cmd_msg.cmd;
@@ -1573,7 +1614,14 @@ pub fn create_direct_client<'a>(
 
     // Acquire a reference to the worker pool (increments client count).
     // The pool will be released when the GlideClientHandle is dropped.
-    let worker_pool = acquire_worker_pool();
+    let worker_pool = match acquire_worker_pool() {
+        Ok(pool) => pool,
+        Err(error) => {
+            drop(credential_provider_claim);
+            deferred.reject(error);
+            return Ok(promise);
+        }
+    };
 
     // Create push notification channel for pub/sub
     let (push_sender, mut push_receiver) = mpsc::unbounded_channel::<PushInfo>();
@@ -1706,8 +1754,145 @@ pub fn create_direct_client<'a>(
     Ok(promise)
 }
 
+/// Opaque graph ownership; N-API finalization drops the retained Rust context.
+#[derive(Clone)]
+#[napi]
+pub struct GraphHandle {
+    context: Arc<glide_core::graph::GraphContext>,
+    client_id: u64,
+    database: u32,
+    database_epoch: u64,
+}
+
+#[napi]
+impl GraphHandle {
+    /// The immutable database snapshot captured by local selection.
+    #[napi(getter)]
+    pub fn database(&self) -> u32 {
+        self.database
+    }
+
+    /// The exact immutable selection generation.
+    #[napi(getter)]
+    pub fn database_epoch(&self) -> BigInt {
+        BigInt {
+            sign_bit: false,
+            words: vec![self.database_epoch],
+        }
+    }
+}
+
 #[napi]
 impl GlideClientHandle {
+    /// Retain a graph context locally, without connecting or contacting the server.
+    #[napi]
+    pub fn select_graph(&self, name: String) -> Result<GraphHandle> {
+        self.current_database()?;
+        let client = glide_core::scope::get_parent_client(self.client_id)
+            .ok_or_else(|| Error::new(Status::Closing, "Client connection closed"))?;
+        let database_epoch = client.graph_database_epoch();
+        let database = client.current_database();
+        let context = glide_core::graph::GraphContext::new(client.clone(), name, database)
+            .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
+        if database_epoch != client.graph_database_epoch() || database != client.current_database()
+        {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "Cannot select a graph while database selection is unsettled",
+            ));
+        }
+        Ok(GraphHandle {
+            context: Arc::new(context),
+            client_id: self.client_id,
+            database,
+            database_epoch,
+        })
+    }
+
+    /// Read the runtime SELECT state locally without creating a connection.
+    #[napi(getter)]
+    pub fn current_database(&self) -> Result<u32> {
+        if self.closed {
+            return Err(Error::new(Status::Closing, "Client connection closed"));
+        }
+        if glide_core::pool::is_pool_client(self.client_id) {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "Graph handles are not supported on borrowed pool clients",
+            ));
+        }
+        glide_core::scope::get_parent_client(self.client_id)
+            .map(|client| client.current_database())
+            .ok_or_else(|| Error::new(Status::Closing, "Client connection closed"))
+    }
+
+    /// Exact local database generation, including unsettled SELECT attempts.
+    #[napi(getter)]
+    pub fn graph_database_epoch(&self) -> Result<BigInt> {
+        self.current_database()?;
+        glide_core::scope::get_parent_client(self.client_id)
+            .map(|client| BigInt {
+                sign_bit: false,
+                words: vec![client.graph_database_epoch()],
+            })
+            .ok_or_else(|| Error::new(Status::Closing, "Client connection closed"))
+    }
+
+    /// Queue a typed graph request using the ordinary inflight/response lifecycle.
+    #[napi]
+    pub fn send_graph_query(
+        &self,
+        callback_idx: u32,
+        request_bytes: Uint8Array,
+        graph: &GraphHandle,
+    ) -> Result<bool> {
+        let submitted_at = tokio::time::Instant::now();
+        if self.closed {
+            return Err(Error::new(Status::Closing, "Client connection closed"));
+        }
+        if glide_core::pool::is_pool_client(self.client_id) {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "Graph requests are not supported on borrowed pool clients",
+            ));
+        }
+        if graph.client_id != self.client_id {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "Graph handle belongs to another client",
+            ));
+        }
+        let previous = self.inflight_requests.fetch_sub(1, Ordering::AcqRel);
+        if previous <= 0 {
+            self.inflight_requests.fetch_add(1, Ordering::Relaxed);
+            return Ok(false);
+        }
+        let message = WorkerMessage::GraphQuery {
+            callback_idx,
+            request: request_bytes.to_vec(),
+            context: Arc::clone(&graph.context),
+            submitted_at,
+        };
+        let failed = match &self.command_tx {
+            Some(sender) => sender.send(message).is_err(),
+            None => true,
+        };
+        if failed {
+            self.inflight_requests.fetch_add(1, Ordering::Relaxed);
+            let response = CommandResponse {
+                callback_idx,
+                resp_pointer_high: None,
+                resp_pointer_low: None,
+                constant_response: None,
+                request_error: None,
+                closing_error: Some("Client connection closed".to_owned()),
+                is_push: false,
+            };
+            push_response_to_js(&self.response_buffer, &self.wake_callback, response);
+        }
+        Ok(true)
+    }
+
     /// Sends a command to the Valkey/Redis server.
     ///
     /// This method is the core of the direct NAPI layer. It:
@@ -2804,6 +2989,65 @@ pub fn value_from_split_pointer<'a>(
     resp_value_to_js(*value, js_env, string_decoder)
 }
 
+/// Convert canonical graph values only: graph integers must never pass through
+/// the normal command converter's JavaScript number coercion.
+fn graph_value_to_js<'a>(value: Value, env: &'a Env) -> Result<Unknown<'a>> {
+    match value {
+        Value::Int(integer) => BigInt {
+            sign_bit: integer < 0,
+            words: vec![integer.unsigned_abs()],
+        }
+        .into_unknown(env),
+        Value::Array(values) => {
+            let mut array = env.create_array(values.len() as u32)?;
+            for (index, value) in values.into_iter().enumerate() {
+                array.set_element(index as u32, graph_value_to_js(value, env)?)?;
+            }
+            array.into_unknown(env)
+        }
+        Value::Map(entries) => {
+            // Keep maps as entries, including "__proto__", without JS setters.
+            let mut array = env.create_array(entries.len() as u32)?;
+            for (index, (key, value)) in entries.into_iter().enumerate() {
+                let mut entry = Object::new(env)?;
+                entry.set_named_property("key", graph_value_to_js(key, env)?)?;
+                entry.set_named_property("value", graph_value_to_js(value, env)?)?;
+                array.set_element(index as u32, entry)?;
+            }
+            array.into_unknown(env)
+        }
+        Value::Nil
+        | Value::Boolean(_)
+        | Value::Double(_)
+        | Value::BigNumber(_)
+        | Value::SimpleString(_)
+        | Value::BulkString(_) => resp_value_to_js(value, env, true),
+        _ => Err(Error::new(
+            Status::InvalidArg,
+            "Invalid canonical graph response value",
+        )),
+    }
+}
+
+#[napi(ts_return_type = "unknown")]
+pub fn graph_value_from_split_pointer<'a>(
+    env: &'a Env,
+    high_bits: u32,
+    low_bits: u32,
+) -> Result<Unknown<'a>> {
+    let pointer = (low_bits as u64) | ((high_bits as u64) << 32);
+    if pointer == 0 {
+        return Err(Error::new(
+            Status::InvalidArg,
+            "Null graph response pointer",
+        ));
+    }
+    // SAFETY: build_response allocated this Box<Value>; the JS response handler
+    // transfers its split pointer exactly once to this graph-only converter.
+    let value = unsafe { Box::from_raw(pointer as *mut Value) };
+    graph_value_to_js(*value, env)
+}
+
 // Split a pointer into [low, high] u32 pair for testing utilities.
 fn split_pointer<T>(pointer: *mut T) -> [u32; 2] {
     let pointer = pointer as usize;
@@ -3806,6 +4050,103 @@ mod tests {
         )
         .await
         .expect("lazy client construction must not connect")
+    }
+
+    #[tokio::test]
+    async fn graph_handle_clones_share_context_and_last_drop_releases_it() {
+        let client_id = glide_core::pool::allocate_client_id();
+        let client = lazy_client(ConnectionRequest::default()).await;
+        glide_core::scope::register_client(client_id, client);
+        let mut parent = provider_direct_test_handle(client_id);
+        let graph = parent.select_graph("local-only".to_string()).unwrap();
+        let weak = Arc::downgrade(&graph.context);
+        let clone = graph.clone();
+        assert!(Arc::ptr_eq(&graph.context, &clone.context));
+        assert_eq!(clone.context.name(), "local-only");
+        drop(graph);
+        assert!(weak.upgrade().is_some());
+        parent.close().unwrap();
+        assert!(parent.select_graph("closed".to_string()).is_err());
+        drop(clone);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn graph_worker_retains_context_until_late_completion_after_handle_drop() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let client_id = glide_core::pool::allocate_client_id();
+                let client = lazy_client(ConnectionRequest::default()).await;
+                glide_core::scope::register_client(client_id, client.clone());
+                let mut parent = provider_direct_test_handle(client_id);
+                let graph = parent.select_graph("local-only".to_string()).unwrap();
+                let weak = Arc::downgrade(&graph.context);
+                let inflight = Arc::new(AtomicIsize::new(0));
+                let buffer = Arc::new(ResponseBuffer::new());
+                run_worker_message(
+                    WorkerMessage::GraphQuery {
+                        callback_idx: 17,
+                        request: vec![0xff],
+                        context: Arc::clone(&graph.context),
+                        submitted_at: tokio::time::Instant::now(),
+                    },
+                    &client,
+                    &inflight,
+                    &buffer,
+                    &std::sync::Weak::new(),
+                );
+                drop(graph);
+                parent.close().unwrap();
+                assert!(weak.upgrade().is_some());
+                tokio::task::yield_now().await;
+                assert!(weak.upgrade().is_none());
+                assert_eq!(inflight.load(Ordering::Acquire), 1);
+                let responses = buffer.responses.lock();
+                assert_eq!(responses.len(), 1);
+                assert_eq!(responses[0].callback_idx, 17);
+                assert!(responses[0].request_error.is_some());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn graph_worker_rejects_an_expired_submission_before_adaptation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let client = lazy_client(ConnectionRequest {
+                    request_timeout: Some(10),
+                    ..Default::default()
+                })
+                .await;
+                let context =
+                    glide_core::graph::GraphContext::new(client.clone(), "local-only".into(), 0)
+                        .unwrap();
+                let inflight = Arc::new(AtomicIsize::new(0));
+                let buffer = Arc::new(ResponseBuffer::new());
+                run_worker_message(
+                    WorkerMessage::GraphQuery {
+                        callback_idx: 23,
+                        request: vec![0xff],
+                        context: Arc::new(context),
+                        submitted_at: tokio::time::Instant::now()
+                            - std::time::Duration::from_secs(1),
+                    },
+                    &client,
+                    &inflight,
+                    &buffer,
+                    &std::sync::Weak::new(),
+                );
+                tokio::task::yield_now().await;
+                assert_eq!(inflight.load(Ordering::Acquire), 1);
+                let responses = buffer.responses.lock();
+                assert_eq!(responses.len(), 1);
+                assert_eq!(responses[0].callback_idx, 23);
+                assert_eq!(
+                    responses[0].request_error.as_ref().unwrap().error_type,
+                    glide_core::errors::RequestErrorType::Timeout as u32
+                );
+            })
+            .await;
     }
 
     #[tokio::test]

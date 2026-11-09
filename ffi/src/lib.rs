@@ -2647,6 +2647,10 @@ fn create_client_internal(
                 .max(1);
             Builder::new_multi_thread()
                 .enable_all()
+                .thread_stack_size(
+                    glide_core::client::configured_thread_stack_size()
+                        .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+                )
                 .worker_threads(worker_threads)
                 .thread_name("Valkey-GLIDE thread")
                 .build()
@@ -2665,6 +2669,10 @@ fn create_client_internal(
         ClientType::SyncClient => Some(
             Builder::new_multi_thread()
                 .enable_all()
+                .thread_stack_size(
+                    glide_core::client::configured_thread_stack_size()
+                        .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+                )
                 .worker_threads(1)
                 .thread_name("Valkey-GLIDE background")
                 .build()
@@ -4539,6 +4547,12 @@ impl ResponseArena {
                 self.nodes[idx].response_type = ResponseType::Int;
                 self.nodes[idx].int_value = n;
             }
+            Value::BigNumber(n) => {
+                let (ptr, len) = self.store_string(n.to_string().into_bytes());
+                self.nodes[idx].response_type = ResponseType::String;
+                self.nodes[idx].string_value = ptr;
+                self.nodes[idx].string_value_len = len;
+            }
             Value::Double(n) => {
                 self.nodes[idx].response_type = ResponseType::Float;
                 self.nodes[idx].float_value = n;
@@ -4758,6 +4772,23 @@ mod tests_response_arena {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[test]
+    fn graph_large_version_uses_lossless_decimal_string() {
+        let value = Value::BigNumber(u64::MAX.into());
+        let (response, arena) = valkey_value_to_arena_response(value, &[]).unwrap();
+        // SAFETY: the conversion returned a live response owned by this arena;
+        // read its immutable bytes before releasing the arena exactly once.
+        unsafe {
+            assert!(matches!((*response).response_type, ResponseType::String));
+            let bytes = from_raw_parts(
+                (*response).string_value.cast::<u8>(),
+                (*response).string_value_len as usize,
+            );
+            assert_eq!(bytes, u64::MAX.to_string().as_bytes());
+            free_response_arena(arena);
+        }
+    }
+
     /// Owner for `Bytes::from_owner` that records when the allocation is
     /// released, so tests can observe whether a `Bytes` slice is still
     /// pinning its backing buffer (as zero-copy `BulkString`s pin the
@@ -4948,6 +4979,363 @@ pub unsafe extern "C-unwind" fn command(
             span_ptr,
         )
     }
+}
+
+/// Execute a graph-only protobuf request through the existing response transport.
+///
+/// The request is copied and decoded before returning, so callers may immediately
+/// release their input buffer. Results use the normal callback/pipe or synchronous
+/// `CommandResult` ownership rules.
+///
+/// # Safety
+///
+/// `client_adapter_ptr` must be a live pointer returned by [`create_client`].
+/// The caller must prevent [`close_client`] from racing this call.
+/// `request_bytes` must point to `request_len` initialized bytes for this call.
+/// For an asynchronous client, `request_id` must remain valid until completion.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn graph_query(
+    client_adapter_ptr: *const c_void,
+    request_id: usize,
+    request_bytes: *const u8,
+    request_len: usize,
+) -> *mut CommandResult {
+    let submitted_at = tokio::time::Instant::now();
+    // SAFETY: the caller keeps the original Arc alive and excludes close while
+    // this call acquires its own strong reference.
+    let adapter = unsafe {
+        Arc::increment_strong_count(client_adapter_ptr.cast::<ClientAdapter>());
+        Arc::from_raw(client_adapter_ptr.cast::<ClientAdapter>())
+    };
+    // SAFETY: the caller keeps the initialized request buffer live for this call.
+    let request = unsafe { copy_graph_request(request_bytes, request_len) };
+    let client = adapter.core.client.clone();
+    adapter.execute_request(
+        request_id,
+        glide_core::graph::execute_request_at(client, request, submitted_at),
+    )
+}
+
+unsafe fn copy_graph_request(request_bytes: *const u8, request_len: usize) -> RedisResult<Vec<u8>> {
+    if request_len > isize::MAX as usize || (request_bytes.is_null() && request_len != 0) {
+        return Err(RedisError::from((
+            ErrorKind::ClientError,
+            "Invalid graph request buffer",
+        )));
+    }
+    let bytes = if request_len == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: non-null and representable length checked above; the caller
+        // guarantees an initialized allocation that remains live for this call.
+        unsafe { from_raw_parts(request_bytes, request_len) }.to_vec()
+    };
+    glide_core::graph::parse_request(&bytes)
+        .map(|_| bytes)
+        .map_err(|error| {
+            RedisError::from((
+                ErrorKind::ClientError,
+                "Invalid graph request protobuf",
+                error.to_string(),
+            ))
+        })
+}
+
+#[cfg(all(test, not(miri)))]
+mod tests_graph_submission_deadline {
+    use super::*;
+    use protobuf::Message;
+    use std::sync::{Mutex, mpsc};
+    use std::time::Duration;
+
+    static COMPLETION: Mutex<Option<mpsc::Sender<RequestErrorType>>> = Mutex::new(None);
+
+    unsafe extern "C-unwind" fn failure(
+        _id: usize,
+        _message: *const c_char,
+        kind: RequestErrorType,
+    ) {
+        COMPLETION
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send(kind)
+            .unwrap();
+    }
+
+    unsafe extern "C-unwind" fn unexpected_success(_id: usize, _response: *const CommandResponse) {
+        panic!("an expired graph submission cannot succeed");
+    }
+
+    #[test]
+    fn expired_native_graph_submissions_do_not_connect_after_worker_queueing() {
+        for retained in [false, true] {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let mut connection = connection_request::ConnectionRequest::new();
+            connection.lazy_connect = true;
+            connection.request_timeout = 20;
+            let mut address = connection_request::NodeAddress::new();
+            address.host = "127.0.0.1".into();
+            address.port = listener.local_addr().unwrap().port().into();
+            connection.addresses.push(address);
+            let bytes = connection.write_to_bytes().unwrap();
+            let client_type = ClientType::AsyncClient {
+                success_callback: unexpected_success,
+                failure_callback: failure,
+                allow_stack_response: false,
+            };
+            // SAFETY: the input bytes and callback descriptors remain live through
+            // creation; the returned adapter is closed once after all work finishes.
+            let adapter_ptr = unsafe {
+                let response =
+                    create_client(bytes.as_ptr(), bytes.len(), &client_type, None, None, 0);
+                assert!(!response.is_null());
+                assert!((*response).connection_error_message.is_null());
+                let adapter = (*response).conn_ptr;
+                free_connection_response(response.cast_mut());
+                adapter
+            };
+            // SAFETY: this test exclusively owns the live adapter through cleanup.
+            let adapter = unsafe { &*adapter_ptr.cast::<ClientAdapter>() };
+            let (ready, ready_receiver) = mpsc::channel();
+            let mut releases = Vec::new();
+            for _ in 0..adapter.runtime.metrics().num_workers() {
+                let ready = ready.clone();
+                let (release, waiting) = mpsc::channel();
+                releases.push(release);
+                adapter.runtime.spawn(async move {
+                    ready.send(()).unwrap();
+                    waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+                });
+            }
+            for _ in &releases {
+                ready_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            let (completion, completed) = mpsc::channel();
+            *COMPLETION.lock().unwrap() = Some(completion);
+            let request = glide_core::graph_request::QueryRequest {
+                graph_name: "queued".into(),
+                query: "CREATE (n) RETURN n".into(),
+                ..Default::default()
+            };
+            let bytes = request.write_to_bytes().unwrap();
+            let mut context = std::ptr::null_mut();
+            // SAFETY: adapter, context output, and bytes remain live through
+            // submission. The retained context and adapter are released exactly once.
+            unsafe {
+                if retained {
+                    let name = b"queued";
+                    assert!(
+                        graph_context_create(
+                            adapter_ptr,
+                            name.as_ptr(),
+                            name.len(),
+                            0,
+                            0,
+                            &mut context,
+                        )
+                        .is_null()
+                    );
+                    assert!(
+                        graph_query_with_context(
+                            adapter_ptr,
+                            context,
+                            1,
+                            bytes.as_ptr(),
+                            bytes.len(),
+                        )
+                        .is_null()
+                    );
+                } else {
+                    assert!(graph_query(adapter_ptr, 1, bytes.as_ptr(), bytes.len()).is_null());
+                }
+            }
+            drop(bytes);
+            std::thread::sleep(Duration::from_millis(60));
+            for release in releases {
+                release.send(()).unwrap();
+            }
+            let kind = completed.recv_timeout(Duration::from_secs(5)).unwrap();
+            let connected = listener.accept().is_ok();
+            // SAFETY: submission and its callback have completed; no close/drop races.
+            unsafe {
+                graph_context_drop(context);
+                close_client(adapter_ptr);
+            }
+            *COMPLETION.lock().unwrap() = None;
+            assert_eq!(kind as i32, RequestErrorType::Timeout as i32);
+            assert!(!connected, "retained={retained}: expired request connected");
+        }
+    }
+}
+
+/// Retain a selected Rust graph context without connecting or issuing I/O.
+///
+/// On success returns null and writes an owned context to `context_out`.
+/// On failure writes null and returns a synchronous error, even for asynchronous
+/// clients. Free that error with [`free_command_result`].
+///
+/// # Safety
+///
+/// `client_adapter_ptr` must remain live and must not race [`close_client`].
+/// `graph_name` must contain `graph_name_len` initialized bytes for this call.
+/// `context_out` must be a writable pointer. Release a successful context exactly
+/// once with [`graph_context_drop`], after all submissions using it return.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn graph_context_create(
+    client_adapter_ptr: *const c_void,
+    graph_name: *const u8,
+    graph_name_len: usize,
+    database: u32,
+    database_epoch: u64,
+    context_out: *mut *mut c_void,
+) -> *mut CommandResult {
+    if context_out.is_null() {
+        return create_error_result_with_redis_error(RedisError::from((
+            ErrorKind::ClientError,
+            "Missing graph context output",
+        )));
+    }
+    // SAFETY: the caller provides a writable output slot, cleared on every failure.
+    unsafe { *context_out = std::ptr::null_mut() };
+    let context = (|| {
+        if client_adapter_ptr.is_null()
+            || graph_name_len > isize::MAX as usize
+            || (graph_name.is_null() && graph_name_len != 0)
+        {
+            return Err(RedisError::from((
+                ErrorKind::ClientError,
+                "Invalid graph selection buffer",
+            )));
+        }
+        let name = if graph_name_len == 0 {
+            &[][..]
+        } else {
+            // SAFETY: checked non-null/representable length; caller guarantees
+            // initialized bytes for this synchronous local selection.
+            unsafe { from_raw_parts(graph_name, graph_name_len) }
+        };
+        let name = std::str::from_utf8(name)
+            .map_err(|_| RedisError::from((ErrorKind::ClientError, "Graph name must be UTF-8")))?;
+        // SAFETY: the caller excludes close while this live adapter is borrowed.
+        let adapter = unsafe { &*client_adapter_ptr.cast::<ClientAdapter>() };
+        let client = &adapter.core.client;
+        if database_epoch & 1 != 0
+            || client.graph_database_epoch() != database_epoch
+            || client.current_database() != database
+        {
+            return Err(RedisError::from((
+                ErrorKind::ClientError,
+                "Graph selection database or SELECT epoch changed",
+            )));
+        }
+        let context =
+            glide_core::graph::GraphContext::new(client.clone(), name.to_owned(), database)?;
+        if client.graph_database_epoch() != database_epoch {
+            return Err(RedisError::from((
+                ErrorKind::ClientError,
+                "Graph selection SELECT epoch changed",
+            )));
+        }
+        Ok(context)
+    })();
+    match context {
+        Ok(context) => {
+            // SAFETY: the output slot remains writable. Ownership of this Box
+            // transfers to the caller, which releases it with graph_context_drop.
+            unsafe { *context_out = Box::into_raw(Box::new(context)).cast() };
+            std::ptr::null_mut()
+        }
+        Err(error) => create_error_result_with_redis_error(error),
+    }
+}
+
+/// Release a retained graph context. Null is a no-op.
+///
+/// Pending requests own context clones and are independent of this allocation.
+///
+/// # Safety
+///
+/// A non-null pointer must come from [`graph_context_create`], must be released
+/// exactly once, and must not race a [`graph_query_with_context`] submission.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn graph_context_drop(context_ptr: *mut c_void) {
+    if !context_ptr.is_null() {
+        // SAFETY: the caller transfers the unique Box allocation back exactly once;
+        // pending queries retain independent clones of its inner Arc.
+        drop(unsafe { Box::from_raw(context_ptr.cast::<glide_core::graph::GraphContext>()) });
+    }
+}
+
+/// Execute with a retained context using the existing command response transport.
+///
+/// The context is cloned and request copied/decoded before asynchronous dispatch.
+/// The caller may drop the context and request bytes immediately after return.
+///
+/// # Safety
+///
+/// `client_adapter_ptr` must remain live and must not race [`close_client`].
+/// `context_ptr` must be a context selected on this client and must not be dropped
+/// until this function returns. The request buffer and callback identifier have
+/// the same requirements and result ownership as [`graph_query`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn graph_query_with_context(
+    client_adapter_ptr: *const c_void,
+    context_ptr: *const c_void,
+    request_id: usize,
+    request_bytes: *const u8,
+    request_len: usize,
+) -> *mut CommandResult {
+    let submitted_at = tokio::time::Instant::now();
+    // SAFETY: the caller excludes close while this call retains the live adapter.
+    let adapter = unsafe {
+        Arc::increment_strong_count(client_adapter_ptr.cast::<ClientAdapter>());
+        Arc::from_raw(client_adapter_ptr.cast::<ClientAdapter>())
+    };
+    let context = if context_ptr.is_null() {
+        Err(RedisError::from((
+            ErrorKind::ClientError,
+            "Missing retained graph context",
+        )))
+    } else {
+        // SAFETY: the caller keeps the Box live through this synchronous clone.
+        Ok(unsafe { &*context_ptr.cast::<glide_core::graph::GraphContext>() }.clone())
+    };
+    // SAFETY: the caller keeps initialized request bytes live through this copy.
+    let request = unsafe { copy_graph_request(request_bytes, request_len) };
+    adapter.execute_request(request_id, async move {
+        glide_core::graph::execute_request_with_context_at(context?, request, submitted_at).await
+    })
+}
+
+/// Read the client's currently selected database without connecting or issuing I/O.
+///
+/// # Safety
+///
+/// `client_adapter_ptr` must be a live pointer returned by [`create_client`].
+/// The caller must prevent [`close_client`] from racing this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn graph_current_database(client_adapter_ptr: *const c_void) -> u32 {
+    // SAFETY: the caller guarantees that the adapter remains live for this read.
+    let adapter = unsafe { &*client_adapter_ptr.cast::<ClientAdapter>() };
+    adapter.core.client.current_database()
+}
+
+/// Read the database-selection epoch without connecting or issuing I/O.
+///
+/// An odd epoch denotes an unsettled SELECT. Callers must reject selection when
+/// the epoch is odd or changes while reading the database snapshot.
+///
+/// # Safety
+///
+/// `client_adapter_ptr` must remain live and must not race [`close_client`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn graph_database_epoch(client_adapter_ptr: *const c_void) -> u64 {
+    // SAFETY: the caller guarantees that the adapter remains live for this read.
+    let adapter = unsafe { &*client_adapter_ptr.cast::<ClientAdapter>() };
+    adapter.core.client.graph_database_epoch()
 }
 
 /// Where routing info came from across the FFI boundary: legacy protobuf
@@ -7756,7 +8144,14 @@ pub unsafe extern "C-unwind" fn create_monitor_client(
         cache: None,
     };
 
-    let runtime = match Builder::new_multi_thread().enable_all().build() {
+    let runtime = match Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(
+            glide_core::client::configured_thread_stack_size()
+                .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+        )
+        .build()
+    {
         Ok(r) => r,
         Err(e) => {
             let err_msg =

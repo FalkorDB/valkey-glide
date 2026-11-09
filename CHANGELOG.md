@@ -4,6 +4,7 @@
 
 ### Features
 
+* Core, Python, Node, Java, Go, Rust: Add query-first FalkorDB Graph API support for `GRAPH.QUERY` and `GRAPH.RO_QUERY`, typed parameters, all v6.0.3 compact value types, statistics and server timeouts. Graph handles reuse existing clients; operation-scoped schema dictionaries stay on the query's connection. Node graph integers and entity IDs use `bigint` without changing ordinary command results. See [compatibility and cache limitations](docs/graph.md).
 * Go: Add valkey-search 1.3 support, including scoring, cursors, and `FT.HYBRID` ([#7380](https://github.com/valkey-io/valkey-glide/pull/7380))
 * All: Add support for Valkey 9.0 commands:
   * `DELIFEQ` ([#6146](https://github.com/valkey-io/valkey-glide/issues/6146))

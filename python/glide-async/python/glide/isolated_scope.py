@@ -23,9 +23,10 @@ Usage:
 
 import asyncio
 import struct
-from typing import Optional
+from typing import NoReturn, Optional
 
 from glide_shared._glide_ffi import _GlideFFI
+from glide_shared.exceptions import RequestError
 
 
 class AsyncIsolatedScope:
@@ -79,6 +80,10 @@ class AsyncIsolatedScope:
     @property
     def is_released(self) -> bool:
         return self._released
+
+    def select_graph(self, name: str) -> NoReturn:
+        """Reject graph handles that could escape this isolated connection lease."""
+        raise RequestError("Graph handles cannot retain an isolated-scope lease.")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # COMMANDS (all async)

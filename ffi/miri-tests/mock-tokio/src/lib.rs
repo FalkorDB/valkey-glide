@@ -3,3 +3,4 @@
 pub mod task;
 pub mod sync;
 pub mod runtime;
+pub use tokio::time;

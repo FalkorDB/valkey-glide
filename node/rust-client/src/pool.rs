@@ -34,6 +34,10 @@ fn get_pool_runtime() -> &'static tokio::runtime::Runtime {
     POOL_RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            .thread_stack_size(
+                glide_core::client::configured_thread_stack_size()
+                    .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+            )
             .worker_threads(2)
             .thread_name("glide-node-pool")
             .build()

@@ -20,6 +20,106 @@ See GLIDE's Python [documentation site](https://glide.valkey.io/getting-started/
 
 Refer to the [Supported Engine Versions table](https://github.com/valkey-io/valkey-glide/blob/main/README.md#supported-engine-versions) for details.
 
+## FalkorDB graph API
+
+The additive graph API targets the pinned FalkorDB 6.0.3 protocol. Ordinary
+Valkey/Redis deployments do not implement `GRAPH.QUERY`. Select a graph on an
+existing async or sync client:
+
+```python
+graph = client.select_graph("people")  # Local selection; no I/O or graph creation.
+result = await graph.query(
+    "CREATE (p:Person {name:$name}) RETURN p",
+    params={"name": "Ada"},
+    timeout_ms=1000,
+)
+people = await graph.ro_query("MATCH (p:Person) RETURN p")
+```
+
+For `glide_sync`, use the same methods without `await`. The graph handle retains
+its parent client and an owned Rust `GraphContext`; closing that client rejects
+subsequent graph operations. `copy.copy(graph)` shares the retained native context.
+The last Python handle releases its native context automatically, while submitted
+requests hold independent Rust context clones through completion.
+Sync graph calls on one client can run concurrently. Closing the client rejects
+new graph calls immediately, but defers native cleanup until active calls finish
+or reach their original request deadline; it never replays their queries.
+Graph handles inherited across `fork()` are rejected before native dispatch,
+and their native cleanup is skipped in the child. For sync clients, select new
+graph handles on the rebuilt child client; for async clients, create a new client
+in the child before selecting graphs.
+The handle snapshots the currently selected database and its selection epoch.
+Any attempted `SELECT`, including switching away and back, invalidates existing
+handles. Select a new handle after a successful database change. Graph handles
+must not outlive a pooled client lease; selection rejects pooled clients locally.
+Isolated scopes also reject graph selection locally, before and after release.
+
+Parameters support `None`, booleans, signed 64-bit integers, finite floats,
+strings, lists, and string-keyed dictionaries, including nested containers.
+Integers never pass through JSON or floating-point conversion. Unsupported
+objects (including Python dates and graph entities), cycles, invalid identifiers,
+and nesting beyond 32 levels raise local errors with the parameter path.
+`timeout_ms=None` omits the server timeout, while `0` is sent explicitly; the
+accepted range is `0..2**63-1`. The client's request timeout still applies.
+
+`GraphQueryResult` contains ordered `columns` (duplicates preserved), positional
+`rows`, and `GraphStatistics`, including all original statistic lines in `raw`.
+Rows contain Python scalars/lists and shared `GraphNode`, `GraphRelationship`,
+`GraphPath`, `GraphMap`, `GraphPoint`, `GraphVector`, or `GraphTemporal` models.
+`GraphMap.entries` preserves order and duplicate keys, including entity
+properties. Integer statistics preserve the entire unsigned 64-bit range as
+Python integers. Temporal values retain their server kind and raw signed integer;
+they are not implicitly converted to Python date/time/timedelta objects.
+`query` targets a primary; `ro_query` uses the client's read strategy. Both
+surface server errors normally. Metadata resolution is performed by the Rust
+core on the operation's selected connection; Python does not issue schema
+queries or parse raw compact replies.
+
+### Dedicated graph validation
+
+Graph tests are excluded from default plain-Valkey test discovery. After building
+both clients, explicitly run the isolated unit gate:
+
+```bash
+cd python
+.env/bin/python -m pytest -o addopts= graph_tests/test_models.py graph_tests/test_lifetime.py
+```
+
+For the real-server gate, start the digest-pinned harness from the repository root
+and use its printed endpoints (see `utils/falkordb_harness.py --help`):
+
+```bash
+python3 utils/falkordb_harness.py start --topology all --state .build/python-graph.json --format env
+export FALKORDB_STANDALONE_ENDPOINT=127.0.0.1:<standalone-port>
+export FALKORDB_REPLICA_ENDPOINT=127.0.0.1:<replica-port>
+export FALKORDB_CLUSTER_ENDPOINT=127.0.0.1:<cluster-port>
+cd python
+.env/bin/python -m pytest -o addopts= graph_tests
+cd ..
+python3 utils/falkordb_harness.py stop --state .build/python-graph.json
+```
+
+The real gate fails rather than skips when endpoints are absent. It exercises
+asyncio, trio, and uvloop, sync clients, RESP2/RESP3, standalone/cluster, all
+sixteen compact value kinds, exact integer boundaries, recreation, read-only
+errors, database invalidation, and local handle/client lifetimes. Tests use
+unique graph keys and never flush a shared server.
+Entity queries also run with `inflight_requests_limit=1`, proving that query
+admission is released before the core resolves metadata dictionaries.
+The sync gate holds real server replies behind a local TCP proxy to prove that
+two native graph requests overlap, respect their own request deadlines, and
+survive concurrent client close without replay or premature native cleanup.
+Configured-replica read tests additionally cover sync, asyncio, trio, and uvloop
+under both protocols, with both primary and replica addresses configured.
+Replica-side `MONITOR` evidence must show the entity `GRAPH.RO_QUERY` and its
+label/property dictionary queries on the same connection; primary fallback
+cannot satisfy these assertions.
+
+Native pool-destruction rejection tests run on asyncio/uvloop; trio runs the
+complete independent graph-client matrix and local rejection checks. Existing
+trio pool acquisition is tracked separately in
+[valkey-io/valkey-glide#7513](https://github.com/valkey-io/valkey-glide/issues/7513).
+
 # Getting Started - Python Wrapper
 
 ## System Requirements

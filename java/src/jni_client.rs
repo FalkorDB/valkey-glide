@@ -38,6 +38,7 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut c_void) -> jint {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn JNI_OnUnload(_vm: *const JavaVM, _reserved: *const c_void) {
+    crate::graph::clear_contexts();
     // Clean up global references by setting cached Options to None
     // This triggers Drop on GlobalRef objects, which calls delete_global_ref
     // Note: All cache functions use unsafe transmute to return static references
@@ -144,7 +145,10 @@ pub(crate) fn get_runtime() -> &'static Runtime {
             .max_blocking_threads(worker_threads * 2)
             .enable_all()
             .thread_name("glide-worker")
-            .thread_stack_size(2 * 1024 * 1024)
+            .thread_stack_size(
+                glide_core::client::configured_thread_stack_size()
+                    .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+            )
             .thread_keep_alive(std::time::Duration::from_secs(60))
             .build()
             .expect("Failed to create Tokio runtime")
@@ -377,6 +381,15 @@ fn get_callback_worker_threads() -> usize {
     }
 }
 
+fn callback_thread_builder(index: usize) -> thread::Builder {
+    thread::Builder::new()
+        .name(format!("glide-jni-callback-{index}"))
+        .stack_size(
+            glide_core::client::configured_thread_stack_size()
+                .max(glide_core::client::MIN_RUNTIME_STACK_SIZE),
+        )
+}
+
 pub fn init_callback_workers() -> &'static Sender<CallbackJob> {
     CALLBACK_SENDER.get_or_init(|| {
         let (tx, rx) = channel::<CallbackJob>();
@@ -385,8 +398,7 @@ pub fn init_callback_workers() -> &'static Sender<CallbackJob> {
 
         for i in 0..worker_threads {
             let rx_clone = Arc::clone(&rx);
-            thread::Builder::new()
-                .name(format!("glide-jni-callback-{i}"))
+            callback_thread_builder(i)
                 .spawn(move || {
                     // Pre-attach to JVM once at thread start. attach_current_thread_as_daemon
                     // keeps the thread attached for its entire lifetime (no detach on drop).
@@ -1064,9 +1076,30 @@ pub fn complete_error_sync(
 
 #[cfg(test)]
 mod tests {
+    use super::callback_thread_builder;
     use super::generate_safe_handle;
     use super::serialize_array_to_bytes;
     use redis::{Value, parse_redis_value};
+
+    #[test]
+    fn callback_worker_stack_supports_ordinary_deep_value_destruction() {
+        callback_thread_builder(0)
+            .spawn(|| {
+                let mut value = Value::Nil;
+                for depth in 0..512 {
+                    value = if depth % 2 == 0 {
+                        Value::Array(vec![value])
+                    } else {
+                        Value::Map(vec![(Value::Nil, value)])
+                    };
+                }
+                std::hint::black_box(&value);
+                drop(value);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 
     #[test]
     fn ordinary_handles_and_pooled_ids_never_collide() {

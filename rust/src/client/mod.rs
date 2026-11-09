@@ -231,6 +231,11 @@ pub struct GlideClient {
 }
 
 impl GlideClient {
+    /// Select a FalkorDB graph locally without sending a command.
+    pub fn select_graph(&self, name: impl Into<String>) -> ValkeyResult<crate::graph::Graph> {
+        crate::graph::Graph::new(self.inner.clone(), name.into())
+    }
+
     /// Connect using the given standalone configuration.
     pub async fn connect(config: GlideClientConfiguration) -> ValkeyResult<Self> {
         let request = config.to_request();
@@ -336,6 +341,11 @@ pub struct GlideClusterClient {
 }
 
 impl GlideClusterClient {
+    /// Select a FalkorDB graph locally, routing later queries by its name.
+    pub fn select_graph(&self, name: impl Into<String>) -> ValkeyResult<crate::graph::Graph> {
+        crate::graph::Graph::new(self.inner.clone(), name.into())
+    }
+
     /// Connect using the given cluster configuration.
     pub async fn connect(config: GlideClusterClientConfiguration) -> ValkeyResult<Self> {
         let request = config.to_request();

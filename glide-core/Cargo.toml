@@ -123,3 +123,7 @@ harness = false
 [[bench]]
 name = "watchdog_register_bench"
 harness = false
+
+[[bench]]
+name = "graph_benchmark"
+harness = false

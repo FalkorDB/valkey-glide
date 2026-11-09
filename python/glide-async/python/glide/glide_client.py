@@ -21,6 +21,9 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from glide_shared.graph import _NativeGraphContext
+
+    from .graph import Graph
     from .isolated_scope import AsyncIsolatedScope
 
 import sniffio
@@ -733,6 +736,8 @@ class _ProviderNativeCreate:
 
 
 class BaseClient(CoreCommands):
+    _graph_pool_managed: bool = False
+
     # Class default: ClientPool builds its adapters without __init__ and owns their lifetime.
     _core_client_finalizer: Optional["weakref.finalize"] = None
 
@@ -1166,6 +1171,84 @@ class BaseClient(CoreCommands):
                 "Cannot use a client created before fork(). "
                 "Create a new client in the child process."
             )
+
+    def select_graph(self, name: str) -> "Graph":
+        """Select a graph locally, retaining this client and its current database.
+
+        This does not connect or create a graph. A handle rejects operations
+        after the client's selected database changes or the client closes.
+        """
+        from glide_shared.graph import _validate_graph_name
+
+        from .graph import Graph
+
+        _validate_graph_name(name)
+        if getattr(self, "_graph_pool_managed", False):
+            raise RequestError("Graph handles cannot retain a pooled client lease.")
+        self._check_same_process()
+        with self._lock:
+            if self._is_closed or self._core_client is None:
+                raise ClosingError("Client is closed.")
+            epoch = self._lib.graph_database_epoch(self._core_client)
+            database = self._lib.graph_current_database(self._core_client)
+            if epoch & 1 or epoch != self._lib.graph_database_epoch(self._core_client):
+                raise RequestError("Cannot select a graph while SELECT is unsettled.")
+        return Graph(self, name, database, epoch)
+
+    def _create_graph_context(
+        self, name: str, database: int, epoch: int
+    ) -> "_NativeGraphContext":
+        from glide_shared.graph import _NativeGraphContext
+
+        if self._graph_pool_managed:
+            raise RequestError("Graph handles cannot retain a pooled client lease.")
+        self._check_same_process()
+        with self._lock:
+            if self._is_closed or self._core_client is None:
+                raise ClosingError("Client is closed.")
+            pointer = self._ffi.new("void **")
+            encoded = name.encode("utf-8")
+            result = self._lib.graph_context_create(
+                self._core_client, encoded, len(encoded), database, epoch, pointer
+            )
+            if result != self._ffi.NULL:
+                try:
+                    error = result.command_error
+                    message = self._ffi.string(error.command_error_message).decode(
+                        "utf-8"
+                    )
+                    raise get_request_error_class(error.command_error_type)(message)
+                finally:
+                    self._lib.free_command_result(result)
+            return _NativeGraphContext(pointer[0], self._lib.graph_context_drop)
+
+    async def _execute_graph_request(
+        self, request: bytes, context: "_NativeGraphContext"
+    ) -> object:
+        if self._graph_pool_managed:
+            raise RequestError("Graph handles cannot retain a pooled client lease.")
+        self._check_same_process()
+        callback_id = self._get_callback_id()
+        fut = _get_new_future_instance()
+        with self._lock:
+            if self._is_closed or self._core_client is None:
+                raise ClosingError("Client is closed.")
+            self._pending_futures[callback_id] = fut
+            try:
+                self._lib.graph_query_with_context(
+                    self._core_client,
+                    context.pointer,
+                    callback_id,
+                    request,
+                    len(request),
+                )
+            except BaseException:
+                self._pending_futures.pop(callback_id, None)
+                raise
+        try:
+            return await fut
+        finally:
+            self._replace_pending_future(callback_id, fut, None)
 
     async def _execute_command(
         self,

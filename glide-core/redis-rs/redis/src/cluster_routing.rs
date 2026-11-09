@@ -753,7 +753,9 @@ fn base_routing(cmd: &[u8]) -> RouteBy {
         // replica holds none of them and would answer every read as a missing key.
         // Add `BLOB.RDMA_GET` there once the module replicates. For the same reason,
         // `is_key_routing_command` keeps both out of the random-node fallback.
-        b"BLOB.RDMA_GET" | b"BLOB.RDMA_SET" => RouteBy::FirstKey,
+        b"BLOB.RDMA_GET" | b"BLOB.RDMA_SET" | b"GRAPH.QUERY" | b"GRAPH.RO_QUERY" => {
+            RouteBy::FirstKey
+        }
 
         b"LMPOP" | b"SINTERCARD" | b"ZDIFF" | b"ZINTER" | b"ZINTERCARD" | b"ZMPOP" | b"ZUNION" => {
             RouteBy::SecondArgAfterKeyCount
@@ -873,6 +875,10 @@ impl RoutingInfo {
         R: Routable + ?Sized,
     {
         let cmd = &r.command()?[..];
+
+        if matches!(cmd, b"GRAPH.QUERY" | b"GRAPH.RO_QUERY") {
+            return r.arg_idx(1).map(|key| Self::for_key(cmd, key));
+        }
 
         // FT.CURSOR and FT.AGGREGATE/FT.HYBRID ...
         // WITHCURSOR must land on the PRIMARY of the index-name slot,
@@ -1101,7 +1107,8 @@ pub(crate) fn lends_memory(cmd: &[u8]) -> bool {
 pub fn is_readonly_cmd(cmd: &[u8]) -> bool {
     matches!(
         cmd,
-        b"ACL CAT"
+        b"GRAPH.RO_QUERY"
+            | b"ACL CAT"
             | b"ACL DELUSER"
             | b"ACL DRYRUN"
             | b"ACL GENPASS"
@@ -1666,6 +1673,35 @@ mod tests_routing {
     use crate::{cluster_topology::slot, cmd, parser::parse_redis_value, Cmd, Value};
     use core::panic;
     use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn graph_queries_route_by_graph_key_and_declared_readonly_command() {
+        for (name, destination) in [
+            ("GRAPH.QUERY", SlotAddr::Master),
+            ("graph.query", SlotAddr::Master),
+            ("GRAPH.RO_QUERY", SlotAddr::ReplicaOptional),
+            ("gRaPh.Ro_QuErY", SlotAddr::ReplicaOptional),
+        ] {
+            let mut query = cmd(name);
+            query
+                .arg("{tenant}:graph")
+                .arg("CREATE ()")
+                .arg("--compact");
+            assert_eq!(
+                RoutingInfo::for_routable(&query),
+                Some(RoutingInfo::SingleNode(
+                    SingleNodeRoutingInfo::SpecificNode(Route::new(slot(b"tenant"), destination,)),
+                )),
+            );
+            assert!(RoutingInfo::is_key_routing_command(
+                &name.as_bytes().to_ascii_uppercase()
+            ));
+        }
+        assert!(is_readonly_cmd(b"GRAPH.RO_QUERY"));
+        assert!(!is_readonly_cmd(b"GRAPH.QUERY"));
+        let query = cmd("GRAPH.QUERY");
+        assert_eq!(RoutingInfo::for_routable(&query), None);
+    }
 
     /// `BLOB.RDMA_GET <key> <rkey> <remote-address> <length>`, the read half of an RDMA
     /// transfer.

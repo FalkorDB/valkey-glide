@@ -8,6 +8,7 @@
  */
 
 import { readFile } from "node:fs/promises";
+import type { GraphHandle } from "../build-ts/native";
 import Long from "long";
 import { Buffer } from "protobufjs/minimal";
 import {
@@ -294,6 +295,7 @@ import {
     validateCompressionConfiguration,
     valueFromPointer,
     valueFromSplitPointer,
+    graphValueFromSplitPointer,
 } from ".";
 import {
     command_request,
@@ -302,6 +304,12 @@ import {
 } from "../build-ts/ProtobufMessage";
 import { resolveClientLibraryName } from "./ClientLibraryNameResolver.js";
 import { IsolatedScope } from "./IsolatedScope.js";
+import { Graph, GraphQueryResult, QueryOptions } from "./Graph.js";
+import {
+    encodeGraphRequest,
+    materializeGraphResult,
+    validateGraphName,
+} from "./GraphInternal.js";
 import {
     clearScopeConnectionRequest,
     setScopeConnectionRequest,
@@ -1575,6 +1583,7 @@ export class BaseClient {
     protected clientHandle: GlideClientHandle | null = null;
     /** Stores OTel span pointers keyed by callbackIndex for span lifecycle management. */
     private readonly otelSpanPointers = new Map<number, bigint>();
+    private readonly graphCallbacks = new Set<number>();
 
     protected configurePubsub(
         options: GlideClusterClientConfiguration | GlideClientConfiguration,
@@ -1800,6 +1809,7 @@ export class BaseClient {
         const [resolve, reject, decoder = this.defaultDecoder] =
             this.promiseCallbackFunctions[response.callbackIdx];
         this.availableCallbackSlots.push(response.callbackIdx);
+        const isGraph = this.graphCallbacks.delete(response.callbackIdx);
 
         if (response.requestError) {
             const errorType = getRequestErrorClass(
@@ -1812,11 +1822,16 @@ export class BaseClient {
         ) {
             try {
                 resolve(
-                    valueFromSplitPointer(
-                        response.respPointerHigh,
-                        response.respPointerLow,
-                        decoder === Decoder.String,
-                    ),
+                    isGraph
+                        ? graphValueFromSplitPointer(
+                              response.respPointerHigh,
+                              response.respPointerLow,
+                          )
+                        : valueFromSplitPointer(
+                              response.respPointerHigh,
+                              response.respPointerLow,
+                              decoder === Decoder.String,
+                          ),
                 );
             } catch (err: unknown) {
                 Logger.log("error", "Decoder", `Decoding error: '${err}'`);
@@ -10365,6 +10380,101 @@ export class BaseClient {
     }
 
     /**
+     * Select a local typed FalkorDB graph view without contacting the server.
+     * The handle retains this client and the current database snapshot. Existing
+     * handles reject queries after SELECT changes that database or after close.
+     * Graphs are not available on borrowed pool clients or isolated scopes.
+     */
+    public selectGraph(name: string): Graph {
+        this.ensureClientIsUsable();
+        validateGraphName(name);
+        const epoch = this.clientHandle!.graphDatabaseEpoch;
+        const database = this.clientHandle!.currentDatabase;
+
+        if (
+            epoch % 2n !== 0n ||
+            epoch !== this.clientHandle!.graphDatabaseEpoch
+        ) {
+            throw new RequestError(
+                "Cannot select a graph while database selection is unsettled.",
+            );
+        }
+
+        const handle = this.clientHandle!.selectGraph(name);
+
+        if (
+            handle.database !== database ||
+            handle.databaseEpoch !== epoch ||
+            epoch !== this.clientHandle!.graphDatabaseEpoch
+        ) {
+            throw new RequestError(
+                "Cannot select a graph while database selection is unsettled.",
+            );
+        }
+
+        return new Graph(name, database, (query, options, readonly) =>
+            this.executeGraph(
+                handle,
+                name,
+                database,
+                epoch,
+                query,
+                options,
+                readonly,
+            ),
+        );
+    }
+
+    private async executeGraph(
+        handle: GraphHandle,
+        name: string,
+        database: number,
+        databaseEpoch: bigint,
+        query: string,
+        options: QueryOptions | undefined,
+        readonly: boolean,
+    ): Promise<GraphQueryResult> {
+        this.ensureClientIsUsable();
+        const request = encodeGraphRequest(
+            name,
+            database,
+            query,
+            options,
+            readonly,
+            databaseEpoch,
+        );
+        const callbackIndex = this.getCallbackIndex();
+        const result = await new Promise<unknown>((resolve, reject) => {
+            this.promiseCallbackFunctions[callbackIndex] = [resolve, reject];
+            this.graphCallbacks.add(callbackIndex);
+
+            try {
+                if (
+                    this.clientHandle!.sendGraphQuery(
+                        callbackIndex,
+                        request,
+                        handle,
+                    )
+                ) {
+                    return;
+                }
+
+                reject(
+                    new RequestError(
+                        "Inflight request limit exceeded. Please try again later.",
+                    ),
+                );
+            } catch (error) {
+                reject(error);
+            }
+
+            this.graphCallbacks.delete(callbackIndex);
+            this.availableCallbackSlots.push(callbackIndex);
+        });
+        return materializeGraphResult(result);
+    }
+
+    /**
      * Acquire an isolated execution scope on this client: a dedicated connection
      * for operations that need per-connection state, such as `WATCH`/`MULTI`/`EXEC`
      * transactions, `CLIENT TRACKING`, and blocking commands.
@@ -10439,6 +10549,7 @@ export class BaseClient {
         }
 
         this.otelSpanPointers.clear();
+        this.graphCallbacks.clear();
 
         if (this.clientHandle) {
             try {

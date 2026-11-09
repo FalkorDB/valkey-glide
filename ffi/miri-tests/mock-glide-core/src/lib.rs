@@ -6,6 +6,63 @@ pub mod command_request;
 pub mod compression;
 pub mod connection_request;
 pub mod errors;
+pub mod graph {
+    pub use glide_core::graph::parse_request;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    pub struct GraphContext {
+        inner: Arc<(crate::client::Client, String, u32)>,
+    }
+
+    impl GraphContext {
+        pub fn new(
+            client: crate::client::Client,
+            name: String,
+            database: u32,
+        ) -> redis::RedisResult<Self> {
+            Ok(Self {
+                inner: Arc::new((client, name, database)),
+            })
+        }
+    }
+
+    pub async fn execute_request_with_context(
+        graph: GraphContext,
+        bytes: &[u8],
+    ) -> redis::RedisResult<redis::Value> {
+        let result = execute_request(graph.inner.0.clone(), bytes).await;
+        drop(graph);
+        result
+    }
+
+    pub async fn execute_request(
+        _client: crate::client::Client,
+        bytes: &[u8],
+    ) -> redis::RedisResult<redis::Value> {
+        Ok(redis::Value::BulkString(bytes.to_vec().into()))
+    }
+
+    pub async fn execute_request_at<B: AsRef<[u8]>>(
+        client: crate::client::Client,
+        bytes: redis::RedisResult<B>,
+        _submitted_at: tokio::time::Instant,
+    ) -> redis::RedisResult<redis::Value> {
+        let bytes = bytes?;
+        execute_request(client, bytes.as_ref()).await
+    }
+
+    pub async fn execute_request_with_context_at<B: AsRef<[u8]>>(
+        graph: GraphContext,
+        bytes: redis::RedisResult<B>,
+        submitted_at: tokio::time::Instant,
+    ) -> redis::RedisResult<redis::Value> {
+        let result = execute_request_at(graph.inner.0.clone(), bytes, submitted_at).await;
+        drop(graph);
+        result
+    }
+}
+pub use glide_core::graph_request;
 pub mod otel_db_semantics;
 pub mod pool;
 pub mod request_type;

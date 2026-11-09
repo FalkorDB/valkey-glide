@@ -11,6 +11,9 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
+    from glide_shared.graph import _NativeGraphContext
+
+    from .graph import Graph
     from .isolated_scope import IsolatedScope
 
 from glide_shared._fast_response import parse_response as _fast_parse_response
@@ -580,6 +583,8 @@ class RdmaRegion:
 
 
 class BaseClient(CoreCommands):
+    _graph_pool_managed: bool = False
+    _graph_calls: int = 0
 
     def __init__(self, config: BaseClientConfiguration):
         """
@@ -600,12 +605,13 @@ class BaseClient(CoreCommands):
         # Under GIL builds this is a no-op (GIL serializes access).
         # Under free-threaded builds this prevents use-after-free on concurrent close.
         self._client_lock = threading.Lock()
+        self._core_client_pid = os.getpid()
         # How many RDMA FFI calls are using `_core_client`. Guarded by
         # `_client_lock`. `close` cannot free the native client under them, so
         # it cancels their transfers instead and leaves the freeing to the last
         # one out.
         self._rdma_calls = 0
-        # The native client `close` left for the last RDMA call to free.
+        # The native client `close` left for the last RDMA/graph call to free.
         self._deferred_core_client = self._ffi.NULL
         # The callbacks that native client can still call, kept until it is
         # freed.
@@ -633,13 +639,17 @@ class BaseClient(CoreCommands):
         return self
 
     def _create_core_client(self):  # noqa: C901
+        if self._core_client_pid != os.getpid():
+            # A parent graph submission may have held this guard at fork.
+            self._client_lock = threading.Lock()
+            self._core_client_pid = os.getpid()
+        self._graph_calls = 0
         previous_owner = self._credential_provider_callback_owner
         if previous_owner is not None:
             previous_owner.close()
         self._credential_provider_callback_owner = None
         self._credential_provider_callback_ref = None
-        # After a fork, the child has none of the parent's threads, so none of
-        # the RDMA calls the parent had running will ever end here.
+        # After a fork, none of the parent's active native calls can end here.
         self._rdma_calls = 0
         self._deferred_core_client = self._ffi.NULL
         self._deferred_callback_refs = ()
@@ -1051,6 +1061,69 @@ class BaseClient(CoreCommands):
                 raise TypeError("response_buffers entries must be writable")
             if not mv.c_contiguous:
                 raise TypeError("response_buffers entries must be C-contiguous")
+
+    def select_graph(self, name: str) -> "Graph":
+        """Select a graph locally without connecting or creating server state.
+
+        The handle retains this client and snapshots its current database.
+        Selecting a different database invalidates existing graph handles.
+        Inherited handles are rejected after fork; select a new one in the child.
+        """
+        from glide_shared.graph import _validate_graph_name
+
+        from .graph import Graph
+
+        _validate_graph_name(name)
+        if getattr(self, "_graph_pool_managed", False):
+            raise RequestError("Graph handles cannot retain a pooled client lease.")
+        with self._client_lock:
+            if self._is_closed or self._core_client == self._ffi.NULL:
+                raise ClosingError("Client is closed.")
+            epoch = self._lib.graph_database_epoch(self._core_client)
+            database = self._lib.graph_current_database(self._core_client)
+            if epoch & 1 or epoch != self._lib.graph_database_epoch(self._core_client):
+                raise RequestError("Cannot select a graph while SELECT is unsettled.")
+        return Graph(self, name, database, epoch)
+
+    def _create_graph_context(
+        self, name: str, database: int, epoch: int
+    ) -> "_NativeGraphContext":
+        from glide_shared.graph import _NativeGraphContext
+
+        if self._graph_pool_managed:
+            raise RequestError("Graph handles cannot retain a pooled client lease.")
+        with self._client_lock:
+            if self._is_closed or self._core_client == self._ffi.NULL:
+                raise ClosingError("Client is closed.")
+            pointer = self._ffi.new("void **")
+            encoded = name.encode("utf-8")
+            error = self._lib.graph_context_create(
+                self._core_client, encoded, len(encoded), database, epoch, pointer
+            )
+            if error != self._ffi.NULL:
+                self._handle_cmd_result(error)
+            return _NativeGraphContext(pointer[0], self._lib.graph_context_drop)
+
+    def _execute_graph_request(
+        self, request: bytes, context: "_NativeGraphContext"
+    ) -> object:
+        if self._graph_pool_managed:
+            raise RequestError("Graph handles cannot retain a pooled client lease.")
+        # Reject inherited contexts before acquiring a possibly inherited lock
+        # or touching any native state. A rebuilt child adapter cannot use them.
+        pointer = context.pointer
+        with self._client_lock:
+            if self._is_closed or self._core_client == self._ffi.NULL:
+                raise ClosingError("Client is closed.")
+            core_client = self._core_client
+            self._graph_calls += 1
+        try:
+            result = self._lib.graph_query_with_context(
+                core_client, pointer, 0, request, len(request)
+            )
+        finally:
+            self._end_native_call(graph=True)
+        return self._handle_cmd_result(result)
 
     def _execute_command(
         self,
@@ -1973,10 +2046,21 @@ class BaseClient(CoreCommands):
         End a call `_begin_rdma_call` began, and free the native client if
         `close` left that to the last call out and this is it.
         """
+        self._end_native_call(graph=False)
+
+    def _end_native_call(self, *, graph: bool) -> None:
+        """Release one native call's ownership, including a deferred close."""
         with self._client_lock:
-            self._rdma_calls -= 1
+            if graph:
+                self._graph_calls -= 1
+            else:
+                self._rdma_calls -= 1
             core_client = self._deferred_core_client
-            if self._rdma_calls > 0 or core_client == self._ffi.NULL:
+            if (
+                self._rdma_calls > 0
+                or self._graph_calls > 0
+                or core_client == self._ffi.NULL
+            ):
                 return
             self._deferred_core_client = self._ffi.NULL
             callback_refs = self._deferred_callback_refs
@@ -2109,6 +2193,10 @@ class BaseClient(CoreCommands):
         """
         Close the client. Closing twice is a no-op.
 
+        Graph calls already in flight retain the native client until they finish
+        or reach their original deadline. Close rejects new graph calls without
+        waiting for the active ones or replaying them.
+
         With RDMA, this also cancels every transfer in flight on another thread:
         it cuts the server off from every region the client registered, and
         each blocked ``rdma_get`` or ``rdma_set`` then raises ``ClosingError``,
@@ -2139,12 +2227,12 @@ class BaseClient(CoreCommands):
                 core_client = getattr(self, "_core_client", self._ffi.NULL)
                 if core_client != self._ffi.NULL:
                     self._core_client = self._ffi.NULL
-                    if getattr(self, "_rdma_calls", 0) == 0:
+                    if getattr(self, "_rdma_calls", 0) == 0 and self._graph_calls == 0:
                         self._lib.close_client(core_client)
                     else:
                         # Freeing the native client now could free it under an
-                        # RDMA call on another thread. Cancel their transfers
-                        # instead, and let the last call out free it.
+                        # RDMA or graph call on another thread. The last call
+                        # out owns the eventual free.
                         self._deferred_core_client = core_client
                         # It keeps delivering pubsub messages and refreshing
                         # IAM tokens until it is freed, so its callbacks and
@@ -2153,7 +2241,8 @@ class BaseClient(CoreCommands):
                             self._pubsub_callback_ref,
                             self._credential_provider_callback_ref,
                         )
-                        self._cancel_rdma(core_client)
+                        if getattr(self, "_rdma_calls", 0) > 0:
+                            self._cancel_rdma(core_client)
                 self._pubsub_callback_ref = None
                 deferred = getattr(self, "_deferred_core_client", self._ffi.NULL)
                 if deferred == self._ffi.NULL:

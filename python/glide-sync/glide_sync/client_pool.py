@@ -275,6 +275,7 @@ class ClientPool:
             client._lib = self._lib
             client._config = self._client_config
             client._is_closed = False
+            client._graph_pool_managed = True
             client._pubsub_queue = []
             client._pubsub_lock = threading.Lock()
             client._pubsub_condition = threading.Condition(client._pubsub_lock)

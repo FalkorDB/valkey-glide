@@ -24,6 +24,7 @@ Visit our official documentation at [glide.valkey.io](https://glide.valkey.io).
 - **Support for asyncio / anyio / trio** – Native compatibility with modern Python async frameworks, enabling efficient and seamless integration into asynchronous workflows.
 - **[Batching (Pipeline and Transaction)](https://glide.valkey.io/concepts/client-features/batch-commands/)** – Efficiently execute multiple commands in a single network roundtrip, significantly reducing latency and improving throughput.
 - **[OpenTelemetry](https://glide.valkey.io/concepts/client-features/open-telemetry/)** – Integrated tracing support for enhanced observability and easier debugging in distributed environments.
+- **[FalkorDB Graph API](docs/graph.md)** – Typed, parameterized graph queries with shared compact-result decoding for Python async/sync, Node.js, Java, Go, and Rust async/blocking. Initial server baseline: FalkorDB v6.0.3.
 
 ## Supported Engine Versions
 

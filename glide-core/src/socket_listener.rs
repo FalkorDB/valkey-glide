@@ -1237,6 +1237,14 @@ pub fn start_socket_listener_internal<InitCallback>(
     static INITIALIZED_SOCKETS: Lazy<RwLock<HashSet<String>>> =
         Lazy::new(|| RwLock::new(HashSet::new()));
 
+    if crate::client::configured_thread_stack_size() < crate::client::MIN_RUNTIME_STACK_SIZE {
+        init_callback(Err(format!(
+            "RUST_MIN_STACK must be at least {} bytes before Rust threads start; the pinned socket worker pool cannot override its thread stacks",
+            crate::client::MIN_RUNTIME_STACK_SIZE,
+        )));
+        return;
+    }
+
     let socket_path = socket_path.unwrap_or_else(get_socket_path);
 
     {
@@ -1356,4 +1364,59 @@ where
     InitCallback: FnOnce(Result<String, String>) + Send + Clone + 'static,
 {
     start_socket_listener_internal(init_callback, None);
+}
+
+#[cfg(test)]
+mod stack_tests {
+    #[test]
+    fn rejects_undersized_pinned_socket_pool_before_binding() {
+        const CHILD: &str = "GLIDE_SOCKET_STACK_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let path = format!("graph-stack-{}.sock", uuid::Uuid::new_v4());
+            assert!(!std::path::Path::new(&path).exists());
+            let (sender, receiver) = std::sync::mpsc::channel();
+            super::start_socket_listener_internal(
+                move |result| sender.send(result).unwrap(),
+                Some(path.clone()),
+            );
+            let result = receiver.recv().unwrap();
+            let bound = std::path::Path::new(&path).exists();
+            if bound && result.is_ok() {
+                std::fs::remove_file(&path).unwrap();
+            }
+            assert!(
+                !bound,
+                "unsupported workers must be rejected before binding"
+            );
+            assert!(
+                result.unwrap_err().contains("RUST_MIN_STACK"),
+                "startup must explain its stack requirement"
+            );
+            return;
+        }
+
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "socket_listener::stack_tests::rejects_undersized_pinned_socket_pool_before_binding",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("RUST_MIN_STACK", "65536")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "small-stack subprocess failed: {status}");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("small-stack subprocess exceeded its 30-second budget");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 }

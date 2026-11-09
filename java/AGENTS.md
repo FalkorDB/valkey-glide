@@ -63,6 +63,7 @@ This is the Java client binding for Valkey GLIDE, providing both standalone and 
 ./gradlew :integTest:test         # Integration tests (excludes PubSubTests AND modules.* — run those via pubsubTest / modulesTest)
 ./gradlew :integTest:pubsubTest   # PubSub integration tests
 ./gradlew :integTest:scopeTest    # glide.scope.* integration tests
+GLIDE_DOCKER_SERVERS=true ./gradlew :client:graphTest # Pinned FalkorDB only; needs FALKORDB_STANDALONE_ENDPOINT, FALKORDB_REPLICA_ENDPOINT, and FALKORDB_CLUSTER_ENDPOINT
 
 # Linting and Code Quality
 ./gradlew :spotlessCheck         # Check code formatting

@@ -2480,6 +2480,61 @@ mod cluster_async {
 
     #[test]
     #[serial_test::parallel(otel)]
+    fn test_async_cluster_graph_affinity_redirect_resolves_address_once() {
+        for (kind, name) in [
+            ("MOVED", "graph_affinity_moved_resolver"),
+            ("ASK", "graph_affinity_ask_resolver"),
+        ] {
+            let requests = Arc::new(atomic::AtomicUsize::new(0));
+            let observed = requests.clone();
+            let resolutions = Arc::new(atomic::AtomicUsize::new(0));
+            let MockEnv {
+                runtime,
+                async_connection: connection,
+                handler: _handler,
+                ..
+            } = MockEnv::with_client_builder(
+                ClusterClient::builder(vec![&*format!("redis://{name}")]).address_resolver(
+                    Arc::new(NonIdempotentRedirectResolver {
+                        resolved_name: name,
+                        redirect_resolutions: resolutions.clone(),
+                    }),
+                ),
+                name,
+                move |cmd: &[u8], port| {
+                    respond_startup(name, cmd)?;
+                    assert_eq!(port, 6380, "redirect must resolve exactly once");
+                    assert!(contains_slice(cmd, b"GRAPH.RO_QUERY"));
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    Err(Ok(Value::Int(123)))
+                },
+            );
+            let error =
+                parse_redis_value(format!("-{kind} 14000 internal-node:6380\r\n").as_bytes())
+                    .unwrap()
+                    .extract_error()
+                    .unwrap_err();
+            let value = runtime.block_on(async {
+                let mut affine = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    connection.connection_for_redirect(&error),
+                )
+                .await
+                .expect("graph redirect must resolve to its registered endpoint")?;
+                cmd("GRAPH.RO_QUERY")
+                    .arg("graph")
+                    .arg("RETURN 123")
+                    .query_async::<_, i64>(&mut affine)
+                    .await
+            });
+            assert_eq!(value, Ok(123), "{kind}");
+            assert_eq!(resolutions.load(Ordering::SeqCst), 1, "{kind}");
+            assert_eq!(requests.load(Ordering::SeqCst), 1, "{kind}");
+        }
+    }
+
+    #[test]
+    #[serial_test::parallel(otel)]
     fn test_async_cluster_uncached_moved_resolves_address_once() {
         let name = "test_async_cluster_uncached_moved_resolves_address_once";
         let requests = Arc::new(atomic::AtomicUsize::new(0));

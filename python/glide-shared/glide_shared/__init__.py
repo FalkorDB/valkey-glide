@@ -208,6 +208,19 @@ from .exceptions import (
     RequestError,
     TimeoutError,
 )
+from .graph import (
+    GraphMap,
+    GraphNode,
+    GraphParameter,
+    GraphPath,
+    GraphPoint,
+    GraphQueryResult,
+    GraphRelationship,
+    GraphStatistics,
+    GraphTemporal,
+    GraphValue,
+    GraphVector,
+)
 from .opentelemetry import (
     OpenTelemetryConfig,
     OpenTelemetryMetricsConfig,
@@ -225,6 +238,17 @@ from .routes import (
 )
 
 __all__ = [
+    "GraphMap",
+    "GraphNode",
+    "GraphParameter",
+    "GraphPath",
+    "GraphPoint",
+    "GraphQueryResult",
+    "GraphRelationship",
+    "GraphStatistics",
+    "GraphTemporal",
+    "GraphValue",
+    "GraphVector",
     # Client
     "Batch",
     "ClusterBatch",
