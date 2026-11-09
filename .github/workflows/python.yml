@@ -65,7 +65,11 @@ on:
             name:
                 required: false
                 type: string
-                description: "(Optional) Test run name"
+                description: "(Optional) Run name shown in the Actions list"
+            test-filter:
+                required: false
+                type: string
+                description: "(Optional) pytest -k expression for the default Tests jobs; pubsub and server_modules tests stay excluded"
             run_async_tests:
                 description: "Run only async tests"
                 required: false
@@ -110,10 +114,10 @@ run-name:
 
 env:
     # Run full test matrix if job started by cron or it was explictly specified by a person who triggered the workflow
-    RUN_FULL_MATRIX: ${{ (github.event.inputs.full-matrix == 'true' || github.event_name == 'schedule' || inputs.full-matrix == true) }}
-    RUN_WITH_MACOS: ${{ (github.event.inputs.run-with-macos) }}
-    RUN_SYNC_ONLY: ${{ (github.event.inputs.run_sync_tests == 'true' && github.event.inputs.run_async_tests == 'false') }}
-    RUN_ASYNC_ONLY: ${{ (github.event.inputs.run_async_tests == 'true' && github.event.inputs.run_sync_tests == 'false') }}
+    RUN_FULL_MATRIX: ${{ (inputs.full-matrix == true || github.event_name == 'schedule') }}
+    RUN_WITH_MACOS: ${{ inputs.run-with-macos }}
+    RUN_SYNC_ONLY: ${{ (inputs.run_sync_tests == true && inputs.run_async_tests != true) }}
+    RUN_ASYNC_ONLY: ${{ (inputs.run_async_tests == true && inputs.run_sync_tests != true) }}
     BASE_PYTHON_VERSION: "3.13"
 
 jobs:
@@ -146,7 +150,7 @@ jobs:
         name: Python Tests - ${{ matrix.python }}, EngineVersion - ${{ matrix.engine.version }}, Target - ${{ matrix.host.TARGET }}
         runs-on: ${{ matrix.host.RUNNER }}
         needs: [get-matrices, approve-self-hosted]
-        if: always() && needs.get-matrices.result == 'success' && (needs.approve-self-hosted.result == 'success' || needs.approve-self-hosted.result == 'skipped') && github.event.inputs.containers-only != 'true'
+        if: always() && needs.get-matrices.result == 'success' && (needs.approve-self-hosted.result == 'success' || needs.approve-self-hosted.result == 'skipped') && inputs.containers-only != true
         timeout-minutes: 120
         strategy:
             fail-fast: false
@@ -201,13 +205,21 @@ jobs:
               if: ${{ env.RUN_FULL_MATRIX != 'true' && env.RUN_SYNC_ONLY == 'false' && env.RUN_ASYNC_ONLY == 'false' }}
               working-directory: ./python
               env:
-                  TEST_NAME_ARG: ${{ inputs.name && format('-k {0}', inputs.name) || '' }}
+                  TEST_FILTER: ${{ inputs.test-filter }}
                   AWS_ACCESS_KEY_ID: test_access_key
                   AWS_SECRET_ACCESS_KEY: test_secret_key
                   AWS_SESSION_TOKEN: test_session_token
               run: |
                   ulimit -n 65536 2>/dev/null || true
-                  python3 dev.py test --args -n 4 --dist loadgroup -m "not serial_only" --async-backend=asyncio --html=pytest_report.html --self-contained-html "$TEST_NAME_ARG"
+                  filter=()
+                  if [ -n "$TEST_FILTER" ]; then
+                      # A command-line -k replaces the one in pytest.ini, so keep its exclusions.
+                      filter=(-k "not server_modules and not pubsub and ($TEST_FILTER)")
+                  fi
+                  # With a filter, pytest exits 5 when it matches only serial tests. Let the
+                  # serial step decide: it fails the job only if both steps matched nothing.
+                  python3 dev.py test --args -n 4 --dist loadgroup -m "not serial_only" --async-backend=asyncio --html=pytest_report.html --self-contained-html "${filter[@]}" \
+                      || { rc=$?; [ "$rc" -eq 5 ] && [ -n "$TEST_FILTER" ] && echo "MAIN_RUN_EMPTY=true" >> "$GITHUB_ENV" || exit "$rc"; }
 
             - name: Test with pytest (full matrix, all async backends)
               if: ${{ env.RUN_FULL_MATRIX == 'true' }}
@@ -245,13 +257,17 @@ jobs:
             - name: Test with pytest (serial-only tests)
               working-directory: ./python
               env:
-                  TEST_NAME_ARG: ${{ inputs.name && format('-k {0}', inputs.name) || '' }}
+                  TEST_FILTER: ${{ inputs.test-filter }}
                   AWS_ACCESS_KEY_ID: test_access_key
                   AWS_SECRET_ACCESS_KEY: test_secret_key
                   AWS_SESSION_TOKEN: test_session_token
               run: |
                   # Same mode selection as the xdist steps above, so each mode runs
                   # its serial tests with its own backends and directory.
+                  filter=()
+                  if [ -n "$TEST_FILTER" ]; then
+                      filter=(-k "not server_modules and not pubsub and ($TEST_FILTER)")
+                  fi
                   if [ "$RUN_FULL_MATRIX" = "true" ]; then
                       python3 dev.py test --args -m serial_only --async-backend=asyncio --async-backend=trio --html=pytest_report_serial.html --self-contained-html
                   elif [ "$RUN_ASYNC_ONLY" = "true" ]; then
@@ -259,7 +275,10 @@ jobs:
                   elif [ "$RUN_SYNC_ONLY" = "true" ]; then
                       python3 dev.py test --args -m serial_only tests/sync_tests --html=pytest_report_serial.html --self-contained-html
                   else
-                      python3 dev.py test --args -m serial_only --async-backend=asyncio --html=pytest_report_serial.html --self-contained-html "$TEST_NAME_ARG"
+                      # pytest exits 5 when a filter matches no serial tests. That is fine unless
+                      # the xdist step matched nothing too, so a filter that selects no test fails.
+                      python3 dev.py test --args -m serial_only --async-backend=asyncio --html=pytest_report_serial.html --self-contained-html "${filter[@]}" \
+                          || { rc=$?; [ "$rc" -eq 5 ] && [ -n "$TEST_FILTER" ] && [ "$MAIN_RUN_EMPTY" != "true" ] || exit "$rc"; }
                   fi
 
             - uses: ./.github/workflows/test-benchmark
@@ -277,8 +296,8 @@ jobs:
               with:
                   name: test-report-python-${{ matrix.python }}-${{ matrix.engine.type }}-${{ matrix.engine.version }}-${{ matrix.host.OS }}-${{ matrix.host.ARCH }}
                   path: |
-                      python/tests/pytest_report.html
-                      python/tests/pytest_report_serial.html
+                      python/pytest_report.html
+                      python/pytest_report_serial.html
                       utils/clusters/**
                       benchmarks/results/**
 
@@ -287,7 +306,7 @@ jobs:
         name: Python PubSubTests - ${{ matrix.python }}, EngineVersion - ${{ matrix.engine.version }}, Target - ${{ matrix.host.TARGET }}
         runs-on: ${{ matrix.host.RUNNER }}
         needs: [get-matrices, approve-self-hosted]
-        if: always() && needs.get-matrices.result == 'success' && (needs.approve-self-hosted.result == 'success' || needs.approve-self-hosted.result == 'skipped') && github.event.inputs.containers-only != 'true'
+        if: always() && needs.get-matrices.result == 'success' && (needs.approve-self-hosted.result == 'success' || needs.approve-self-hosted.result == 'skipped') && inputs.containers-only != true
         timeout-minutes: 120
         strategy:
             fail-fast: false
@@ -365,7 +384,7 @@ jobs:
 
             - name: Rebuild Python wrapper with pubsub mock
               if: ${{ env.RUN_FULL_MATRIX != 'true'
-                  && (github.event.inputs.run-dynamic-pubsub-with-mock == 'true'
+                  && (inputs.run-dynamic-pubsub-with-mock == true
                   || steps.pubsub_mock_changes.outputs.mock_pubsub == 'true') }}
               uses: ./.github/workflows/build-python-wrapper
               with:
@@ -377,7 +396,7 @@ jobs:
 
             - name: Test dynamic pubsub with mock
               if: ${{ env.RUN_FULL_MATRIX != 'true'
-                  && (github.event.inputs.run-dynamic-pubsub-with-mock == 'true'
+                  && (inputs.run-dynamic-pubsub-with-mock == true
                   || steps.pubsub_mock_changes.outputs.mock_pubsub == 'true') }}
               working-directory: ./python
               run: |
@@ -390,11 +409,11 @@ jobs:
               with:
                   name: pubsub-test-report-python-${{ matrix.python }}-${{ matrix.engine.type }}-${{ matrix.engine.version }}-${{ matrix.host.OS }}-${{ matrix.host.ARCH }}
                   path: |
-                      python/tests/pytest_report.html
+                      python/pytest_report.html
 
     lint:
         runs-on: ubuntu-24.04
-        if: ${{ github.event.inputs.containers-only != 'true' }}
+        if: ${{ inputs.containers-only != true }}
         timeout-minutes: 15
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -419,7 +438,7 @@ jobs:
 
     docs-test:
         runs-on: ubuntu-24.04
-        if: ${{ github.event.inputs.containers-only != 'true' }}
+        if: ${{ inputs.containers-only != true }}
         timeout-minutes: 15
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -441,7 +460,7 @@ jobs:
 
     get-containers:
         runs-on: ubuntu-24.04
-        if: ${{ github.event.inputs.full-matrix == 'true' || github.event.inputs.containers-only == 'true' || github.event_name == 'schedule' || inputs.full-matrix == true }}
+        if: ${{ inputs.full-matrix == true || inputs.containers-only == true || github.event_name == 'schedule' }}
         outputs:
             engine-matrix-output: ${{ steps.get-matrices.outputs.engine-matrix-output }}
             host-matrix-output: ${{ steps.get-matrices.outputs.host-matrix-output }}
@@ -541,6 +560,6 @@ jobs:
               with:
                   name: test-report-python-${{ matrix.python }}-${{ matrix.engine.type }}-${{ matrix.engine.version }}-${{ env.IMAGE }}-${{ matrix.host.ARCH }}
                   path: |
-                      python/tests/pytest_report.html
+                      python/pytest_report.html
                       utils/clusters/**
                       benchmarks/results/**
