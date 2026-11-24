@@ -13,6 +13,7 @@
 
 ### Fixes
 
+* Core: route FalkorDB `GRAPH.*` commands in cluster mode. `GRAPH.LIST`, `GRAPH.UDF` writes and `GRAPH.CONFIG SET` reach every primary or node; `GRAPH.CONSTRAINT` and `GRAPH.MEMORY` route by their key; `GRAPH.RO_QUERY` follows the read-from-replica setting, and read-only clients accept it. Graph writes are no longer resent after an I/O error that doesn't show whether the server ran them.
 * Core: keep timeout watchdog pending counts isolated from retired workers and losing singleton initialization candidates ([#7762](https://github.com/valkey-io/valkey-glide/pull/7762))
 * Core: prevent missed refresh completion notifications ([#7766](https://github.com/valkey-io/valkey-glide/pull/7766))
 * Core: reinit the global timeout watchdog in forked children ([#7569](https://github.com/valkey-io/valkey-glide/pull/7569))
