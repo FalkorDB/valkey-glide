@@ -1129,6 +1129,25 @@ pub(crate) fn lends_memory(cmd: &[u8]) -> bool {
     matches!(cmd, b"BLOB.RDMA_GET" | b"BLOB.RDMA_SET")
 }
 
+/// Returns `true` if the given `cmd` is a FalkorDB graph command that may change
+/// data or server state, so running it twice is not the same as running it once.
+/// Every `GRAPH.*` command not listed here as read-only counts as a write, so a
+/// graph command added later defaults to no resend.
+pub(crate) fn is_graph_write(cmd: &[u8]) -> bool {
+    cmd.starts_with(b"GRAPH.")
+        && !matches!(
+            cmd,
+            b"GRAPH.RO_QUERY"
+                | b"GRAPH.EXPLAIN"
+                | b"GRAPH.PROFILE"
+                | b"GRAPH.LIST"
+                | b"GRAPH.UDF LIST"
+                | b"GRAPH.CONFIG GET"
+                | b"GRAPH.MEMORY"
+                | b"GRAPH.SLOWLOG"
+        )
+}
+
 /// Returns `true` if the given `cmd` is a readonly command.
 pub fn is_readonly_cmd(cmd: &[u8]) -> bool {
     matches!(
@@ -1702,7 +1721,9 @@ mod tests_routing {
         command_for_multi_slot_indices, AggregateOp, MultiSlotArgPattern, MultipleNodeRoutingInfo,
         ResponsePolicy, Route, RoutingInfo, ShardAddrs, SingleNodeRoutingInfo, SlotAddr,
     };
-    use crate::cluster_routing::{is_readonly, is_readonly_cmd, Routable, ShardUpdateResult};
+    use crate::cluster_routing::{
+        is_graph_write, is_readonly, is_readonly_cmd, Routable, ShardUpdateResult,
+    };
     use crate::{cluster_topology::slot, cmd, parser::parse_redis_value, Cmd, Value};
     use core::panic;
     use std::sync::{Arc, RwLock};
@@ -2569,6 +2590,40 @@ mod tests_routing {
                 !RoutingInfo::is_key_routing_command(&Routable::command(&routable).unwrap()),
                 "{command}"
             );
+        }
+    }
+
+    #[test]
+    fn test_is_graph_write() {
+        for name in [
+            "GRAPH.QUERY",
+            "GRAPH.DELETE",
+            "GRAPH.COPY",
+            "GRAPH.CONSTRAINT",
+            "GRAPH.UDF LOAD",
+            "GRAPH.UDF DELETE",
+            "GRAPH.UDF FLUSH",
+            "GRAPH.CONFIG SET",
+            "GRAPH.RESTORE",
+            // Not listed anywhere yet: treated as a write.
+            "GRAPH.SOMETHING_NEW",
+        ] {
+            assert!(is_graph_write(name.as_bytes()), "{name}");
+        }
+        for name in [
+            "GRAPH.RO_QUERY",
+            "GRAPH.EXPLAIN",
+            "GRAPH.PROFILE",
+            "GRAPH.LIST",
+            "GRAPH.UDF LIST",
+            "GRAPH.CONFIG GET",
+            "GRAPH.MEMORY",
+            "GRAPH.SLOWLOG",
+            "SET",
+            "INCR",
+            "BLOB.RDMA_SET",
+        ] {
+            assert!(!is_graph_write(name.as_bytes()), "{name}");
         }
     }
 
