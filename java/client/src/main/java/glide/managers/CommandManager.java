@@ -58,7 +58,13 @@ public class CommandManager {
                             "XREAD",
                             "XREADGROUP",
                             "WAIT",
-                            "WAITAOF"));
+                            "WAITAOF",
+                            // FalkorDB flags these `blocking`; glide-core's request
+                            // timeout still bounds them.
+                            "GRAPH.QUERY",
+                            "GRAPH.RO_QUERY",
+                            "GRAPH.EXPLAIN",
+                            "GRAPH.PROFILE"));
 
     /** Core client connection. */
     private final GlideCoreClient coreClient;

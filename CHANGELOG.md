@@ -15,6 +15,7 @@
 
 * Core: route FalkorDB `GRAPH.*` commands in cluster mode. `GRAPH.LIST`, `GRAPH.UDF` writes and `GRAPH.CONFIG SET` reach every primary or node; `GRAPH.CONSTRAINT` and `GRAPH.MEMORY` route by their key; `GRAPH.RO_QUERY` follows the read-from-replica setting, and read-only clients accept it. Graph writes are no longer resent after an I/O error that doesn't show whether the server ran them.
   * Behavior change for raw `GRAPH.*` commands in cluster mode: `GRAPH.LIST` returns the graphs of every primary, merged, instead of one random node's; `GRAPH.RO_QUERY` can be served by a replica when read-from-replica is set, instead of always a primary; `GRAPH.UDF LIST` goes to a random primary, since replicas reject it.
+  * `GRAPH.QUERY`, `GRAPH.RO_QUERY`, `GRAPH.EXPLAIN` and `GRAPH.PROFILE` count as blocking commands, as FalkorDB flags them: they're left out of latency tracking, the pool abandon monitor and the scope watchdog skip them, and Java no longer runs its own timer for them as custom commands. The request timeout still applies.
   * Known limitation: a merged `GRAPH.LIST` can miss the graphs of a primary that has no connection ([#7842](https://github.com/valkey-io/valkey-glide/issues/7842)).
 * Core: keep timeout watchdog pending counts isolated from retired workers and losing singleton initialization candidates ([#7762](https://github.com/valkey-io/valkey-glide/pull/7762))
 * Core: prevent missed refresh completion notifications ([#7766](https://github.com/valkey-io/valkey-glide/pull/7766))

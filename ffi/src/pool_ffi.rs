@@ -1646,6 +1646,12 @@ mod watchdog_gating_tests {
         assert!(!arms("BZMPOP", &["0", "1", "k", "MIN"]));
         assert!(!arms("WAIT", &["0", "100"]));
         assert!(!arms("WAITAOF", &["1", "0", "0"]));
+        // FalkorDB graph queries; the core request timeout still bounds them.
+        assert!(!arms("GRAPH.QUERY", &["g", "RETURN 1"]));
+        assert!(!arms("GRAPH.RO_QUERY", &["g", "RETURN 1"]));
+        assert!(!arms("GRAPH.EXPLAIN", &["g", "RETURN 1"]));
+        assert!(!arms("GRAPH.PROFILE", &["g", "RETURN 1"]));
+        assert!(arms("GRAPH.DELETE", &["g"]));
     }
 
     #[test]

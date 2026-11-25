@@ -836,6 +836,12 @@ pub fn is_blocking_command_name(name: &[u8], args: &[Vec<u8>]) -> bool {
         // A transfer cut short ends without the server's reply, which revokes its
         // region and loses the caller's buffer.
         b"BLOB.RDMA_GET" | b"BLOB.RDMA_SET" => true,
+        // FalkorDB flags these `blocking`: it runs them on its own worker threads,
+        // and a query can legitimately run far longer than an ordinary command.
+        // Being here keeps them out of latency tracking and stops the pool
+        // abandon monitor and the scope watchdog from cutting them short. The
+        // request timeout from `get_request_timeout` still applies.
+        b"GRAPH.QUERY" | b"GRAPH.RO_QUERY" | b"GRAPH.EXPLAIN" | b"GRAPH.PROFILE" => true,
         // BLOCK is matched case-insensitively, mirroring `Cmd::position`.
         b"XREAD" | b"XREADGROUP" => args.iter().any(|a| a.eq_ignore_ascii_case(b"BLOCK")),
         _ => false,
@@ -6713,6 +6719,56 @@ mod tests {
             assert!(!is_blocking_command(&cmd), "{name}");
             assert!(!is_blocking_command_name(name.as_bytes(), &[]), "{name}");
         }
+    }
+
+    #[test]
+    fn test_graph_queries_count_as_blocking() {
+        // FalkorDB 6.2.0 flags exactly these four graph commands `blocking`.
+        for name in [
+            "GRAPH.QUERY",
+            "GRAPH.RO_QUERY",
+            "GRAPH.EXPLAIN",
+            "GRAPH.PROFILE",
+        ] {
+            let mut cmd = Cmd::new();
+            cmd.arg(name).arg("g").arg("RETURN 1");
+            assert!(is_blocking_command(&cmd), "{name}");
+            assert!(
+                is_blocking_command_name(name.as_bytes(), &[]),
+                "{name} by name"
+            );
+            assert!(
+                is_blocking_command_name(name.to_ascii_lowercase().as_bytes(), &[]),
+                "{name} lowercased"
+            );
+        }
+
+        // The other graph commands aren't flagged `blocking` by the server.
+        for name in [
+            "GRAPH.COPY",
+            "GRAPH.DELETE",
+            "GRAPH.CONSTRAINT",
+            "GRAPH.LIST",
+            "GRAPH.MEMORY",
+        ] {
+            let mut cmd = Cmd::new();
+            cmd.arg(name).arg("g");
+            assert!(!is_blocking_command(&cmd), "{name}");
+            assert!(!is_blocking_command_name(name.as_bytes(), &[]), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_graph_query_timeout_is_unchanged_by_blocking() {
+        // Being on the blocking list must not drop the request timeout: a graph
+        // query still gets the client's configured timeout.
+        let mut cmd = Cmd::new();
+        cmd.arg("GRAPH.QUERY").arg("g").arg("RETURN 1");
+        let default_timeout = Duration::from_millis(250);
+        assert_eq!(
+            get_request_timeout(&cmd, default_timeout).unwrap(),
+            Some(default_timeout)
+        );
     }
 
     #[test]
