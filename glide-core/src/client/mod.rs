@@ -6723,7 +6723,8 @@ mod tests {
 
     #[test]
     fn test_graph_queries_count_as_blocking() {
-        // FalkorDB 6.2.0 flags exactly these four graph commands `blocking`.
+        // FalkorDB 6.2 flags exactly these four graph commands `blocking`
+        // (checked with COMMAND INFO on 6.2.0 and 6.2.1).
         for name in [
             "GRAPH.QUERY",
             "GRAPH.RO_QUERY",

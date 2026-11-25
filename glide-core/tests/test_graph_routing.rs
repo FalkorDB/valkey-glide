@@ -7,7 +7,7 @@
 //! and a cluster of 3 primaries with 1 replica each:
 //!
 //! ```sh
-//! IMAGE=falkordb/falkordb:6.2.0 utils/start-falkordb-docker.sh
+//! IMAGE=falkordb/falkordb:6.2.1 utils/start-falkordb-docker.sh
 //! source utils/.falkordb-endpoints.env
 //! cd glide-core && cargo test --features proto --test test_graph_routing -- --ignored
 //! ```

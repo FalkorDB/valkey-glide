@@ -8,8 +8,8 @@
 # bypassed: it would also start the FalkorDB browser on port 3000 on every node.
 #
 # Usage:
-#   IMAGE=falkordb/falkordb:6.2.0 utils/start-falkordb-docker.sh
-#   IMAGE=falkordb/falkordb:6.2.0 VALKEY_IMAGE=valkey/valkey:7.2 utils/start-falkordb-docker.sh
+#   IMAGE=falkordb/falkordb:6.2.1 utils/start-falkordb-docker.sh
+#   IMAGE=falkordb/falkordb:6.2.1 VALKEY_IMAGE=valkey/valkey:7.2 utils/start-falkordb-docker.sh
 #   utils/start-falkordb-docker.sh stop
 #
 # Environment:
@@ -54,7 +54,7 @@ if [ "${1:-}" = "stop" ]; then
     exit 0
 fi
 
-: "${IMAGE:?IMAGE must be set, e.g. falkordb/falkordb:6.2.0}"
+: "${IMAGE:?IMAGE must be set, e.g. falkordb/falkordb:6.2.1}"
 
 docker pull "$IMAGE"
 

@@ -267,7 +267,7 @@ jobs:
     test-graph:
         needs: graph-changes
         if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.graph-changes.outputs.graph == 'true') }}
-        name: Graph routing (6.2.0 on Valkey${{ matrix.valkey != 'bundled' && format(' {0}', matrix.valkey) || '' }})
+        name: Graph routing (6.2.1 on Valkey${{ matrix.valkey != 'bundled' && format(' {0}', matrix.valkey) || '' }})
         runs-on: ubuntu-24.04
         timeout-minutes: 30
         strategy:
@@ -279,7 +279,7 @@ jobs:
             CARGO_INCREMENTAL: "0"
             # Only FalkorDB 6.x on Valkey is supported; 4.x (a Redis module) is not
             # tested. Pinned by version; bump it in a reviewed PR.
-            FALKORDB_IMAGE: falkordb/falkordb:6.2.0
+            FALKORDB_IMAGE: falkordb/falkordb:6.2.1
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
