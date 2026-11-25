@@ -946,10 +946,9 @@ impl<C> CmdArg<C> {
     /// client's memory, and a graph write may already have been applied.
     fn resend_unsafe(&self) -> bool {
         match self {
-            CmdArg::Cmd { cmd, .. } => cmd.command().is_some_and(|name| {
-                crate::cluster_routing::lends_memory(&name)
-                    || crate::cluster_routing::is_graph_write(&name)
-            }),
+            CmdArg::Cmd { cmd, .. } => cmd
+                .command()
+                .is_some_and(|name| crate::cluster_routing::is_resend_unsafe(&name)),
             _ => false,
         }
     }

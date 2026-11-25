@@ -1123,9 +1123,20 @@ pub fn is_readonly(routable: &impl Routable) -> bool {
     }
 }
 
+/// Returns `true` if resending `cmd` after an error that doesn't say whether the
+/// server got it could do harm, so the cluster client must not resend it
+/// immediately. Two kinds of command qualify:
+/// - an RDMA transfer, which may still be using the client's memory;
+/// - a graph write, which may already have been applied.
+///
+/// Read-only graph commands such as `GRAPH.RO_QUERY` stay resendable.
+pub(crate) fn is_resend_unsafe(cmd: &[u8]) -> bool {
+    lends_memory(cmd) || is_graph_write(cmd)
+}
+
 /// Returns `true` if the given `cmd` is an RDMA transfer, which lends the
 /// client's memory to the server until the server replies.
-pub(crate) fn lends_memory(cmd: &[u8]) -> bool {
+fn lends_memory(cmd: &[u8]) -> bool {
     matches!(cmd, b"BLOB.RDMA_GET" | b"BLOB.RDMA_SET")
 }
 
@@ -1134,7 +1145,7 @@ pub(crate) fn lends_memory(cmd: &[u8]) -> bool {
 /// Every `GRAPH.*` command not listed here as read-only counts as a write, so a
 /// graph command added later defaults to no resend. `GRAPH.PROFILE` is a write:
 /// it runs its query, so profiling a `CREATE` creates the data.
-pub(crate) fn is_graph_write(cmd: &[u8]) -> bool {
+fn is_graph_write(cmd: &[u8]) -> bool {
     cmd.starts_with(b"GRAPH.")
         && !matches!(
             cmd,
@@ -1722,7 +1733,7 @@ mod tests_routing {
         ResponsePolicy, Route, RoutingInfo, ShardAddrs, SingleNodeRoutingInfo, SlotAddr,
     };
     use crate::cluster_routing::{
-        is_graph_write, is_readonly, is_readonly_cmd, Routable, ShardUpdateResult,
+        is_graph_write, is_readonly, is_readonly_cmd, is_resend_unsafe, Routable, ShardUpdateResult,
     };
     use crate::{cluster_topology::slot, cmd, parser::parse_redis_value, Cmd, Value};
     use core::panic;
@@ -2625,6 +2636,29 @@ mod tests_routing {
             "BLOB.RDMA_SET",
         ] {
             assert!(!is_graph_write(name.as_bytes()), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_is_resend_unsafe() {
+        for name in [
+            "BLOB.RDMA_GET",
+            "BLOB.RDMA_SET",
+            "GRAPH.QUERY",
+            "GRAPH.PROFILE",
+            "GRAPH.UDF LOAD",
+        ] {
+            assert!(is_resend_unsafe(name.as_bytes()), "{name}");
+        }
+        for name in [
+            "GRAPH.RO_QUERY",
+            "GRAPH.EXPLAIN",
+            "GRAPH.UDF LIST",
+            "GET",
+            "SET",
+            "INCR",
+        ] {
+            assert!(!is_resend_unsafe(name.as_bytes()), "{name}");
         }
     }
 
