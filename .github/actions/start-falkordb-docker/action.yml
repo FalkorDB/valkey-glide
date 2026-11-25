@@ -1,0 +1,32 @@
+name: Start FalkorDB Servers via Docker
+description: >
+    Start FalkorDB servers for the graph routing tests: a standalone primary
+    with one replica, and a 6-node cluster (3 primaries, 3 replicas). Every
+    node runs the image's own server binary with the image's FalkorDB module.
+    Sets GRAPH_STANDALONE_ENDPOINTS and GRAPH_CLUSTER_ENDPOINTS. Linux only
+    (--network host).
+
+inputs:
+    image:
+        description: >
+            FalkorDB Docker image. Pin it by version tag or digest, so that an
+            image rebuild cannot change what a PR is tested against.
+        required: true
+    valkey-image:
+        description: >
+            Optional Valkey image whose valkey-server runs instead of the
+            FalkorDB image's own, with the same FalkorDB module. Pin it by
+            version tag.
+        required: false
+        default: ""
+
+runs:
+    using: composite
+    steps:
+        - name: Start FalkorDB servers via Docker
+          shell: bash
+          env:
+              IMAGE: ${{ inputs.image }}
+              VALKEY_IMAGE: ${{ inputs.valkey-image }}
+          run: |
+              "${GITHUB_ACTION_PATH}/../../../utils/start-falkordb-docker.sh"

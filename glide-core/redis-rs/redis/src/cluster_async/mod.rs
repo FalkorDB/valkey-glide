@@ -941,11 +941,14 @@ enum CmdArg<C> {
 }
 
 impl<C> CmdArg<C> {
-    fn lends_memory(&self) -> bool {
+    /// Whether resending this request after an error that doesn't say if the
+    /// server got it could do harm: an RDMA transfer may still be using the
+    /// client's memory, and a graph write may already have been applied.
+    fn resend_unsafe(&self) -> bool {
         match self {
             CmdArg::Cmd { cmd, .. } => cmd
                 .command()
-                .is_some_and(|name| crate::cluster_routing::lends_memory(&name)),
+                .is_some_and(|name| crate::cluster_routing::is_resend_unsafe(&name)),
             _ => false,
         }
     }
@@ -1641,9 +1644,11 @@ where
 
                 let retry_method = match err.retry_method() {
                     // The error does not say whether the server got the command. If
-                    // it did, it may still be using the client's memory, and a reply
-                    // to a second attempt would not say when the first one stops.
-                    RetryMethod::RetryImmediately if request.info.cmd.lends_memory() => {
+                    // it did, an RDMA transfer may still be using the client's memory,
+                    // and a reply to a second attempt would not say when the first one
+                    // stops; a graph write may have been applied, and would be applied
+                    // twice.
+                    RetryMethod::RetryImmediately if request.info.cmd.resend_unsafe() => {
                         RetryMethod::NoRetry
                     }
                     retry_method => retry_method,

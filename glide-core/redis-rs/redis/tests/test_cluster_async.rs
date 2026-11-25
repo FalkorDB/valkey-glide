@@ -5785,6 +5785,135 @@ mod cluster_async {
         assert_eq!(requests.load(atomic::Ordering::SeqCst), 2);
     }
 
+    /// Sends `command` through a two-primary mock cluster whose first request
+    /// fails with `first_error`, and returns the result and the number of
+    /// requests the mock received.
+    fn query_graph_after_one_error(
+        name: &'static str,
+        command: redis::Cmd,
+        first_error: fn() -> RedisResult<Value>,
+    ) -> (RedisResult<Value>, usize) {
+        let requests = Arc::new(atomic::AtomicUsize::new(0));
+        let MockEnv {
+            runtime,
+            async_connection: mut connection,
+            ..
+        } = MockEnv::with_client_builder(
+            ClusterClient::builder(vec![&*format!("redis://{name}")]).retries(3),
+            name,
+            {
+                let requests = requests.clone();
+                move |cmd: &[u8], _port| {
+                    respond_startup_two_nodes(name, cmd)?;
+                    match requests.fetch_add(1, atomic::Ordering::SeqCst) {
+                        0 => Err(first_error()),
+                        _ => Err(Ok(Value::Okay)),
+                    }
+                }
+            },
+        );
+        let result = runtime.block_on(command.query_async::<_, Value>(&mut connection));
+        (result, requests.load(atomic::Ordering::SeqCst))
+    }
+
+    /// An I/O error that does not say whether the command was sent.
+    fn ambiguous_io_error() -> RedisResult<Value> {
+        Err(RedisError::from(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "io-error",
+        )))
+    }
+
+    #[test]
+    #[serial_test::parallel(otel)]
+    fn test_async_cluster_graph_write_is_not_retried_after_an_io_error() {
+        for (name, command) in [
+            (
+                "test_async_cluster_graph_query_is_not_retried_after_an_io_error",
+                cmd("GRAPH.QUERY").arg("foo").arg("CREATE ()").clone(),
+            ),
+            (
+                "test_async_cluster_graph_constraint_is_not_retried_after_an_io_error",
+                cmd("graph.constraint")
+                    .arg("CREATE")
+                    .arg("foo")
+                    .arg("UNIQUE")
+                    .clone(),
+            ),
+            (
+                // PROFILE runs its query, so profiling a CREATE writes.
+                "test_async_cluster_graph_profile_is_not_retried_after_an_io_error",
+                cmd("GRAPH.PROFILE").arg("foo").arg("CREATE ()").clone(),
+            ),
+        ] {
+            let (result, received) = query_graph_after_one_error(name, command, ambiguous_io_error);
+            // A second attempt could apply the write twice, so the error goes back
+            // to the caller instead.
+            assert!(result.unwrap_err().is_io_error(), "{name}");
+            assert_eq!(received, 1, "{name}");
+        }
+    }
+
+    #[test]
+    #[serial_test::parallel(otel)]
+    fn test_async_cluster_graph_udf_load_is_not_retried_after_an_io_error() {
+        // Sent to both nodes: one fails, and neither is sent again.
+        for (name, command) in [
+            (
+                "test_async_cluster_graph_udf_load_is_not_retried_after_an_io_error",
+                cmd("GRAPH.UDF").arg("LOAD").arg("lib").arg("code").clone(),
+            ),
+            (
+                "test_async_cluster_graph_config_set_is_not_retried_after_an_io_error",
+                cmd("GRAPH.CONFIG")
+                    .arg("SET")
+                    .arg("RESULTSET_SIZE")
+                    .arg(100)
+                    .clone(),
+            ),
+        ] {
+            let (result, received) = query_graph_after_one_error(name, command, ambiguous_io_error);
+            assert!(result.unwrap_err().is_io_error(), "{name}");
+            assert_eq!(received, 2, "{name}");
+        }
+    }
+
+    #[test]
+    #[serial_test::parallel(otel)]
+    fn test_async_cluster_graph_read_is_retried_after_an_io_error() {
+        for (name, command) in [
+            (
+                "test_async_cluster_graph_ro_query_is_retried_after_an_io_error",
+                cmd("GRAPH.RO_QUERY").arg("foo").arg("RETURN 1").clone(),
+            ),
+            (
+                "test_async_cluster_graph_explain_is_retried_after_an_io_error",
+                cmd("GRAPH.EXPLAIN").arg("foo").arg("RETURN 1").clone(),
+            ),
+            (
+                "test_async_cluster_graph_udf_list_is_retried_after_an_io_error",
+                cmd("GRAPH.UDF").arg("LIST").clone(),
+            ),
+        ] {
+            let (result, received) = query_graph_after_one_error(name, command, ambiguous_io_error);
+            assert_eq!(result, Ok(Value::Okay), "{name}");
+            assert_eq!(received, 2, "{name}");
+        }
+    }
+
+    #[test]
+    #[serial_test::parallel(otel)]
+    fn test_async_cluster_graph_write_is_retried_after_tryagain() {
+        // The server refused it before running it.
+        let (result, received) = query_graph_after_one_error(
+            "test_async_cluster_graph_write_is_retried_after_tryagain",
+            cmd("GRAPH.QUERY").arg("foo").arg("CREATE ()").clone(),
+            || parse_redis_value(b"-TRYAGAIN mock\r\n"),
+        );
+        assert_eq!(result, Ok(Value::Okay));
+        assert_eq!(received, 2);
+    }
+
     /// A transfer whose connection could not send it, such as one whose RDMA
     /// handshake left the connection unusable, is sent again once the connection
     /// is replaced: the first attempt never reached the server, so it cannot still

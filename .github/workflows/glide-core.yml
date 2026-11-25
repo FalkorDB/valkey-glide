@@ -36,6 +36,8 @@ on:
             - benchmarks/install_and_test.sh
             - benchmarks/utilities/**
             - utils/cluster_manager.py
+            - utils/start-falkordb-docker.sh
+            - .github/actions/start-falkordb-docker/action.yml
 
             # Exclusions
             - "!**/*.md"
@@ -68,6 +70,8 @@ on:
             - benchmarks/install_and_test.sh
             - benchmarks/utilities/**
             - utils/cluster_manager.py
+            - utils/start-falkordb-docker.sh
+            - .github/actions/start-falkordb-docker/action.yml
 
             # Exclusions
             - "!**/*.md"
@@ -157,7 +161,7 @@ jobs:
         runs-on: ${{ matrix.host.RUNNER }}
         needs: [get-matrices, approve-self-hosted]
         if: always() && needs.get-matrices.result == 'success' && (needs.approve-self-hosted.result == 'success' || needs.approve-self-hosted.result == 'skipped')
-        timeout-minutes: 35
+        timeout-minutes: 60
         strategy:
             fail-fast: false
             matrix:
@@ -196,6 +200,13 @@ jobs:
               working-directory: ./glide-core
               run: cargo test --locked --features "proto,socket-layer,standalone_heartbeat"
 
+            - name: Run glide-core tests over a Unix socket
+              if: ${{ !cancelled() && (inputs.full-matrix == true || github.event_name == 'schedule') && matrix.host.OS == 'ubuntu' }}
+              working-directory: ./glide-core
+              env:
+                  GLIDE_TEST_UNIX_SOCKET: "1"
+              run: cargo test --locked --features "proto,socket-layer,standalone_heartbeat"
+
             - name: Install libfabric
               uses: ./.github/actions/install-libfabric
 
@@ -226,6 +237,91 @@ jobs:
               if: always()
               working-directory: ./glide-core
               run: cargo clean -p glide-core -p glide-core-engine -p glide-logger -p glide-telemetry -p glide-rdma -p glide-libfabric-sys
+
+    # On pull requests, the graph tests run only when graph code changed.
+    graph-changes:
+        if: github.event_name == 'pull_request'
+        runs-on: ubuntu-24.04
+        outputs:
+            graph: ${{ steps.filter.outputs.graph }}
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  persist-credentials: false
+            - id: filter
+              uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+              with:
+                  filters: |
+                      graph:
+                          - glide-core/redis-rs/redis/src/cluster_routing.rs
+                          - glide-core/redis-rs/redis/src/cluster_async/**
+                          - glide-core/src/graph/**
+                          - glide-core/tests/test_graph*.rs
+                          - utils/start-falkordb-docker.sh
+                          - .github/actions/start-falkordb-docker/**
+                          - .github/workflows/glide-core.yml
+
+    # Routing of raw FalkorDB GRAPH.* commands, against real FalkorDB servers.
+    # A full-matrix run (nightly or requested) also runs the FalkorDB module on
+    # every Valkey version GLIDE tests; otherwise only on the image's own Valkey.
+    test-graph:
+        needs: graph-changes
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.graph-changes.outputs.graph == 'true') }}
+        name: Graph routing (6.2.1 on Valkey${{ matrix.valkey != 'bundled' && format(' {0}', matrix.valkey) || '' }})
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
+        strategy:
+            fail-fast: false
+            matrix:
+                # "bundled" is the Valkey that the FalkorDB image ships (9.2).
+                valkey: ${{ fromJSON((inputs.full-matrix == true || github.event_name == 'schedule') && '["7.2", "8.0", "8.1", "9.0", "bundled"]' || '["bundled"]') }}
+        env:
+            CARGO_INCREMENTAL: "0"
+            # Only FalkorDB 6.x on Valkey is supported; 4.x (a Redis module) is not
+            # tested. Pinned by version; bump it in a reviewed PR.
+            FALKORDB_IMAGE: falkordb/falkordb:6.2.1
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  persist-credentials: false
+
+            - uses: ./.github/actions/install-rust
+
+            - uses: ./.github/actions/install-protoc
+              with:
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+
+            - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+              with:
+                  path: |
+                      glide-core/target
+                  key: x86_64-unknown-linux-gnu-glide-core-graph-${{ hashFiles('glide-core/Cargo.lock') }}
+                  restore-keys: |
+                      x86_64-unknown-linux-gnu-glide-core-graph-
+                      x86_64-unknown-linux-gnu-glide-core-v2-
+
+            - uses: ./.github/actions/start-falkordb-docker
+              with:
+                  image: ${{ env.FALKORDB_IMAGE }}
+                  valkey-image: ${{ matrix.valkey != 'bundled' && format('valkey/valkey:{0}', matrix.valkey) || '' }}
+
+            - name: Run graph routing tests
+              working-directory: ./glide-core
+              run: cargo test --locked --features "proto,socket-layer,standalone_heartbeat" --test test_graph_routing -- --ignored
+
+            - name: Server logs
+              if: failure()
+              run: |
+                  for name in $(docker ps -a --format '{{.Names}}' | grep '^glide-falkordb-'); do
+                      echo "::group::${name}"
+                      docker logs "$name" 2>&1 | tail -50
+                      echo "::endgroup::"
+                  done
+
+            - name: Remove the path crates from the cargo cache
+              if: always()
+              working-directory: ./glide-core
+              run: cargo clean -p glide-core -p glide-core-engine -p glide-logger -p glide-telemetry
 
     lint:
         runs-on: ubuntu-24.04

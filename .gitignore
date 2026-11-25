@@ -89,3 +89,6 @@ __pycache__/
 test-report*.html
 node/test-report*.html
 .module-ci-local-scratch/
+
+# Endpoints written by utils/start-falkordb-docker.sh outside CI
+utils/.falkordb-endpoints.env

@@ -600,13 +600,15 @@ impl ResponsePolicy {
             | b"CLIENT REPLY" | b"CLIENT SETNAME" | b"CLIENT SETINFO" | b"CLIENT UNPAUSE"
             | b"CONFIG SET" | b"CONFIG RESETSTAT" | b"CONFIG REWRITE" | b"FLUSHALL"
             | b"FLUSHDB" | b"FUNCTION DELETE" | b"FUNCTION FLUSH" | b"FUNCTION LOAD"
-            | b"FUNCTION RESTORE" | b"MEMORY PURGE" | b"MSET" | b"JSON.MSET" | b"PING"
-            | b"SCRIPT FLUSH" | b"SCRIPT LOAD" | b"SELECT" | b"SLOWLOG RESET" | b"UNWATCH"
-            | b"WATCH" | b"RESET" | b"SAVE" => Some(ResponsePolicy::AllSucceeded),
+            | b"FUNCTION RESTORE" | b"GRAPH.CONFIG SET" | b"GRAPH.UDF DELETE"
+            | b"GRAPH.UDF FLUSH" | b"GRAPH.UDF LOAD" | b"MEMORY PURGE" | b"MSET" | b"JSON.MSET"
+            | b"PING" | b"SCRIPT FLUSH" | b"SCRIPT LOAD" | b"SELECT" | b"SLOWLOG RESET"
+            | b"UNWATCH" | b"WATCH" | b"RESET" | b"SAVE" => Some(ResponsePolicy::AllSucceeded),
 
             b"KEYS"
             | b"FT._ALIASLIST"
             | b"FT._LIST"
+            | b"GRAPH.LIST"
             | b"MGET"
             | b"JSON.MGET"
             | b"SLOWLOG GET"
@@ -642,6 +644,7 @@ enum RouteBy {
     FirstKey,
     MultiShard(MultiSlotArgPattern),
     Random,
+    RandomPrimary,
     SecondArg,
     SecondArgAfterKeyCount,
     SecondArgSlot,
@@ -665,6 +668,8 @@ fn base_routing(cmd: &[u8]) -> RouteBy {
         | b"CONFIG SET"
         | b"FUNCTION KILL"
         | b"FUNCTION STATS"
+        // FalkorDB neither replicates nor persists its configuration.
+        | b"GRAPH.CONFIG SET"
         | b"PUBSUB CHANNELS"
         | b"PUBSUB NUMPAT"
         | b"PUBSUB NUMSUB"
@@ -693,6 +698,10 @@ fn base_routing(cmd: &[u8]) -> RouteBy {
         | b"FUNCTION FLUSH"
         | b"FUNCTION LOAD"
         | b"FUNCTION RESTORE"
+        | b"GRAPH.LIST"
+        | b"GRAPH.UDF DELETE"
+        | b"GRAPH.UDF FLUSH"
+        | b"GRAPH.UDF LOAD"
         | b"INFO"
         | b"KEYS"
         | b"LATENCY DOCTOR"
@@ -740,7 +749,21 @@ fn base_routing(cmd: &[u8]) -> RouteBy {
         | b"OBJECT FREQ"
         | b"OBJECT IDLETIME"
         | b"OBJECT REFCOUNT"
-        | b"JSON.DEBUG" => RouteBy::SecondArg,
+        | b"JSON.DEBUG"
+        // GRAPH.CONSTRAINT CREATE|DROP <key> ... and GRAPH.MEMORY USAGE <key>.
+        | b"GRAPH.CONSTRAINT"
+        | b"GRAPH.MEMORY" => RouteBy::SecondArg,
+
+        // FalkorDB graph commands keyed by their first argument. They are the
+        // default, listed so the graph routing reads in one place. GRAPH.COPY
+        // names two keys; the server rejects them with CROSSSLOT unless both
+        // share a slot. GRAPH.RO_QUERY goes to a replica under a read-from-replica
+        // setting, through `is_readonly_cmd`.
+        b"GRAPH.COPY" | b"GRAPH.DELETE" | b"GRAPH.EXPLAIN" | b"GRAPH.PROFILE"
+        | b"GRAPH.QUERY" | b"GRAPH.RO_QUERY" => RouteBy::FirstKey,
+
+        // FalkorDB flags GRAPH.UDF as a write, so replicas reject even its LIST.
+        b"GRAPH.UDF LIST" => RouteBy::RandomPrimary,
 
         b"MIGRATE" => RouteBy::ThirdArg,
 
@@ -798,6 +821,7 @@ fn base_routing(cmd: &[u8]) -> RouteBy {
         | b"CONFIG GET"
         | b"ECHO"
         | b"FUNCTION LIST"
+        | b"GRAPH.CONFIG GET"
         | b"LASTSAVE"
         | b"LOLWUT"
         | b"MODULE LIST"
@@ -862,9 +886,11 @@ impl RoutingInfo {
                     true
                 }
             }
-            RouteBy::AllNodes | RouteBy::AllPrimaries | RouteBy::Random | RouteBy::Undefined => {
-                false
-            }
+            RouteBy::AllNodes
+            | RouteBy::AllPrimaries
+            | RouteBy::Random
+            | RouteBy::RandomPrimary
+            | RouteBy::Undefined => false,
         }
     }
 
@@ -971,6 +997,10 @@ impl RoutingInfo {
 
             RouteBy::Random => Some(RoutingInfo::SingleNode(SingleNodeRoutingInfo::Random)),
 
+            RouteBy::RandomPrimary => Some(RoutingInfo::SingleNode(
+                SingleNodeRoutingInfo::RandomPrimary,
+            )),
+
             RouteBy::ThirdArgAfterKeyCount => {
                 let key_count = r
                     .arg_idx(2)
@@ -1036,6 +1066,7 @@ impl RoutingInfo {
             RouteBy::AllNodes
             | RouteBy::AllPrimaries
             | RouteBy::Random
+            | RouteBy::RandomPrimary
             | RouteBy::SecondArgSlot
             | RouteBy::Undefined => None,
 
@@ -1092,10 +1123,40 @@ pub fn is_readonly(routable: &impl Routable) -> bool {
     }
 }
 
+/// Returns `true` if resending `cmd` after an error that doesn't say whether the
+/// server got it could do harm, so the cluster client must not resend it
+/// immediately. Two kinds of command qualify:
+/// - an RDMA transfer, which may still be using the client's memory;
+/// - a graph write, which may already have been applied.
+///
+/// Read-only graph commands such as `GRAPH.RO_QUERY` stay resendable.
+pub(crate) fn is_resend_unsafe(cmd: &[u8]) -> bool {
+    lends_memory(cmd) || is_graph_write(cmd)
+}
+
 /// Returns `true` if the given `cmd` is an RDMA transfer, which lends the
 /// client's memory to the server until the server replies.
-pub(crate) fn lends_memory(cmd: &[u8]) -> bool {
+fn lends_memory(cmd: &[u8]) -> bool {
     matches!(cmd, b"BLOB.RDMA_GET" | b"BLOB.RDMA_SET")
+}
+
+/// Returns `true` if the given `cmd` is a FalkorDB graph command that may change
+/// data or server state, so running it twice is not the same as running it once.
+/// Every `GRAPH.*` command not listed here as read-only counts as a write, so a
+/// graph command added later defaults to no resend. `GRAPH.PROFILE` is a write:
+/// it runs its query, so profiling a `CREATE` creates the data.
+fn is_graph_write(cmd: &[u8]) -> bool {
+    cmd.starts_with(b"GRAPH.")
+        && !matches!(
+            cmd,
+            b"GRAPH.RO_QUERY"
+                | b"GRAPH.EXPLAIN"
+                | b"GRAPH.LIST"
+                | b"GRAPH.UDF LIST"
+                | b"GRAPH.CONFIG GET"
+                | b"GRAPH.MEMORY"
+                | b"GRAPH.SLOWLOG"
+        )
 }
 
 /// Returns `true` if the given `cmd` is a readonly command.
@@ -1197,6 +1258,11 @@ pub fn is_readonly_cmd(cmd: &[u8]) -> bool {
             | b"GET"
             | b"GETBIT"
             | b"GETRANGE"
+            // FalkorDB flags these readonly, so replicas accept them.
+            | b"GRAPH.CONFIG GET"
+            | b"GRAPH.CONFIG SET"
+            | b"GRAPH.LIST"
+            | b"GRAPH.RO_QUERY"
             | b"HELLO"
             | b"HEXISTS"
             | b"HGET"
@@ -1349,7 +1415,9 @@ pub trait Routable {
         let mut primary_command = match primary_command.as_slice() {
             b"XGROUP" | b"OBJECT" | b"SLOWLOG" | b"FUNCTION" | b"MODULE" | b"COMMAND"
             | b"PUBSUB" | b"CONFIG" | b"MEMORY" | b"XINFO" | b"CLIENT" | b"ACL" | b"SCRIPT"
-            | b"CLUSTER" | b"LATENCY" | b"SENTINEL" => primary_command,
+            | b"CLUSTER" | b"LATENCY" | b"SENTINEL" | b"GRAPH.CONFIG" | b"GRAPH.UDF" => {
+                primary_command
+            }
             _ => {
                 return Some(primary_command);
             }
@@ -1664,7 +1732,9 @@ mod tests_routing {
         command_for_multi_slot_indices, AggregateOp, MultiSlotArgPattern, MultipleNodeRoutingInfo,
         ResponsePolicy, Route, RoutingInfo, ShardAddrs, SingleNodeRoutingInfo, SlotAddr,
     };
-    use crate::cluster_routing::{is_readonly, is_readonly_cmd, Routable, ShardUpdateResult};
+    use crate::cluster_routing::{
+        is_graph_write, is_readonly, is_readonly_cmd, is_resend_unsafe, Routable, ShardUpdateResult,
+    };
     use crate::{cluster_topology::slot, cmd, parser::parse_redis_value, Cmd, Value};
     use core::panic;
     use std::sync::{Arc, RwLock};
@@ -2382,6 +2452,241 @@ mod tests_routing {
             Some(RoutingInfo::SingleNode(SingleNodeRoutingInfo::Random)),
             "CLIENT LIST should be routed to a random node"
         );
+    }
+
+    /// Builds a command from space-separated words, e.g. `graph("GRAPH.UDF LOAD lib code")`.
+    fn graph(words: &str) -> Cmd {
+        let mut words = words.split(' ');
+        let mut command = cmd(words.next().unwrap());
+        for word in words {
+            command.arg(word);
+        }
+        command
+    }
+
+    #[test]
+    fn test_graph_two_word_command_names() {
+        for (command, name) in [
+            ("GRAPH.UDF LOAD lib code", "GRAPH.UDF LOAD"),
+            ("graph.udf list", "GRAPH.UDF LIST"),
+            ("GRAPH.CONFIG SET TIMEOUT_DEFAULT 0", "GRAPH.CONFIG SET"),
+            ("Graph.Config get TIMEOUT", "GRAPH.CONFIG GET"),
+            // Other graph commands keep a one-word name: their argument 1 is a key.
+            ("GRAPH.QUERY udf RETURN 1", "GRAPH.QUERY"),
+            ("GRAPH.CONSTRAINT CREATE g", "GRAPH.CONSTRAINT"),
+            ("GRAPH.UDF", "GRAPH.UDF"),
+        ] {
+            assert_eq!(
+                Routable::command(&graph(command)).unwrap(),
+                name.as_bytes(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_graph_key_commands_route_by_their_key() {
+        // (command, key, routes by the read setting)
+        for (command, key, readonly) in [
+            ("GRAPH.QUERY g MATCH (n) RETURN n", "g", false),
+            ("GRAPH.RO_QUERY g MATCH (n) RETURN n", "g", true),
+            ("graph.ro_query g MATCH (n) RETURN n", "g", true),
+            ("GRAPH.DELETE g", "g", false),
+            ("GRAPH.EXPLAIN g MATCH (n) RETURN n", "g", false),
+            ("GRAPH.PROFILE g MATCH (n) RETURN n", "g", false),
+            ("GRAPH.COPY {g}src {g}dst", "{g}src", false),
+            // The key is argument 2: argument 1 is a subcommand.
+            (
+                "GRAPH.CONSTRAINT CREATE g UNIQUE NODE P PROPERTIES 1 v",
+                "g",
+                false,
+            ),
+            (
+                "GRAPH.CONSTRAINT DROP g UNIQUE NODE P PROPERTIES 1 v",
+                "g",
+                false,
+            ),
+            ("GRAPH.MEMORY USAGE g", "g", false),
+        ] {
+            let routable = graph(command);
+            let expected = Route::new(
+                crate::cluster_topology::get_slot(key.as_bytes()),
+                if readonly {
+                    SlotAddr::ReplicaOptional
+                } else {
+                    SlotAddr::Master
+                },
+            );
+            assert_eq!(
+                RoutingInfo::for_routable(&routable),
+                Some(RoutingInfo::SingleNode(
+                    SingleNodeRoutingInfo::SpecificNode(expected)
+                )),
+                "{command}"
+            );
+            assert_eq!(
+                RoutingInfo::key_for_command(&routable),
+                Some(key.as_bytes()),
+                "{command}"
+            );
+            assert!(
+                RoutingInfo::is_key_routing_command(&Routable::command(&routable).unwrap()),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_graph_keyless_commands_routing() {
+        for (command, expected) in [
+            (
+                "GRAPH.LIST",
+                RoutingInfo::MultiNode((
+                    MultipleNodeRoutingInfo::AllMasters,
+                    Some(ResponsePolicy::CombineArrays),
+                )),
+            ),
+            (
+                "GRAPH.UDF LOAD lib code",
+                RoutingInfo::MultiNode((
+                    MultipleNodeRoutingInfo::AllMasters,
+                    Some(ResponsePolicy::AllSucceeded),
+                )),
+            ),
+            (
+                "graph.udf load REPLACE lib code",
+                RoutingInfo::MultiNode((
+                    MultipleNodeRoutingInfo::AllMasters,
+                    Some(ResponsePolicy::AllSucceeded),
+                )),
+            ),
+            (
+                "GRAPH.UDF DELETE lib",
+                RoutingInfo::MultiNode((
+                    MultipleNodeRoutingInfo::AllMasters,
+                    Some(ResponsePolicy::AllSucceeded),
+                )),
+            ),
+            (
+                "GRAPH.UDF FLUSH",
+                RoutingInfo::MultiNode((
+                    MultipleNodeRoutingInfo::AllMasters,
+                    Some(ResponsePolicy::AllSucceeded),
+                )),
+            ),
+            (
+                "GRAPH.UDF LIST",
+                RoutingInfo::SingleNode(SingleNodeRoutingInfo::RandomPrimary),
+            ),
+            (
+                "GRAPH.CONFIG GET TIMEOUT",
+                RoutingInfo::SingleNode(SingleNodeRoutingInfo::Random),
+            ),
+            (
+                "GRAPH.CONFIG SET TIMEOUT_DEFAULT 0",
+                RoutingInfo::MultiNode((
+                    MultipleNodeRoutingInfo::AllNodes,
+                    Some(ResponsePolicy::AllSucceeded),
+                )),
+            ),
+        ] {
+            let routable = graph(command);
+            assert_eq!(
+                RoutingInfo::for_routable(&routable),
+                Some(expected),
+                "{command}"
+            );
+            assert_eq!(RoutingInfo::key_for_command(&routable), None, "{command}");
+            assert!(
+                !RoutingInfo::is_key_routing_command(&Routable::command(&routable).unwrap()),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_graph_write() {
+        for name in [
+            "GRAPH.QUERY",
+            "GRAPH.DELETE",
+            "GRAPH.COPY",
+            "GRAPH.CONSTRAINT",
+            "GRAPH.UDF LOAD",
+            "GRAPH.UDF DELETE",
+            "GRAPH.UDF FLUSH",
+            "GRAPH.CONFIG SET",
+            "GRAPH.RESTORE",
+            // Runs its query, which may write.
+            "GRAPH.PROFILE",
+            // Not listed anywhere yet: treated as a write.
+            "GRAPH.SOMETHING_NEW",
+        ] {
+            assert!(is_graph_write(name.as_bytes()), "{name}");
+        }
+        for name in [
+            "GRAPH.RO_QUERY",
+            "GRAPH.EXPLAIN",
+            "GRAPH.LIST",
+            "GRAPH.UDF LIST",
+            "GRAPH.CONFIG GET",
+            "GRAPH.MEMORY",
+            "GRAPH.SLOWLOG",
+            "SET",
+            "INCR",
+            "BLOB.RDMA_SET",
+        ] {
+            assert!(!is_graph_write(name.as_bytes()), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_is_resend_unsafe() {
+        for name in [
+            "BLOB.RDMA_GET",
+            "BLOB.RDMA_SET",
+            "GRAPH.QUERY",
+            "GRAPH.PROFILE",
+            "GRAPH.UDF LOAD",
+        ] {
+            assert!(is_resend_unsafe(name.as_bytes()), "{name}");
+        }
+        for name in [
+            "GRAPH.RO_QUERY",
+            "GRAPH.EXPLAIN",
+            "GRAPH.UDF LIST",
+            "GET",
+            "SET",
+            "INCR",
+        ] {
+            assert!(!is_resend_unsafe(name.as_bytes()), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_graph_commands_replicas_accept() {
+        for name in [
+            "GRAPH.RO_QUERY",
+            "GRAPH.LIST",
+            "GRAPH.CONFIG GET",
+            "GRAPH.CONFIG SET",
+        ] {
+            assert!(is_readonly_cmd(name.as_bytes()), "{name}");
+        }
+        for name in [
+            "GRAPH.QUERY",
+            "GRAPH.DELETE",
+            "GRAPH.COPY",
+            "GRAPH.CONSTRAINT",
+            "GRAPH.EXPLAIN",
+            "GRAPH.PROFILE",
+            "GRAPH.MEMORY",
+            "GRAPH.UDF LOAD",
+            "GRAPH.UDF LIST",
+        ] {
+            assert!(!is_readonly_cmd(name.as_bytes()), "{name}");
+        }
+        assert!(is_readonly(&graph("graph.config get TIMEOUT")));
+        assert!(!is_readonly(&graph("graph.udf list")));
     }
 
     #[test]
