@@ -12,6 +12,13 @@ inputs:
             FalkorDB Docker image. Pin it by version tag or digest, so that an
             image rebuild cannot change what a PR is tested against.
         required: true
+    valkey-image:
+        description: >
+            Optional Valkey image whose valkey-server runs instead of the
+            FalkorDB image's own, with the same FalkorDB module. Pin it by
+            version tag.
+        required: false
+        default: ""
 
 runs:
     using: composite
@@ -20,5 +27,6 @@ runs:
           shell: bash
           env:
               IMAGE: ${{ inputs.image }}
+              VALKEY_IMAGE: ${{ inputs.valkey-image }}
           run: |
               "${GITHUB_ACTION_PATH}/../../../utils/start-falkordb-docker.sh"

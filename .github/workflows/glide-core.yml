@@ -238,11 +238,43 @@ jobs:
               working-directory: ./glide-core
               run: cargo clean -p glide-core -p glide-core-engine -p glide-logger -p glide-telemetry -p glide-rdma -p glide-libfabric-sys
 
+    # On pull requests, the graph tests run only when graph code changed.
+    graph-changes:
+        if: github.event_name == 'pull_request'
+        runs-on: ubuntu-24.04
+        outputs:
+            graph: ${{ steps.filter.outputs.graph }}
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  persist-credentials: false
+            - id: filter
+              uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+              with:
+                  filters: |
+                      graph:
+                          - glide-core/redis-rs/redis/src/cluster_routing.rs
+                          - glide-core/redis-rs/redis/src/cluster_async/**
+                          - glide-core/src/graph/**
+                          - glide-core/tests/test_graph*.rs
+                          - utils/start-falkordb-docker.sh
+                          - .github/actions/start-falkordb-docker/**
+                          - .github/workflows/glide-core.yml
+
     # Routing of raw FalkorDB GRAPH.* commands, against real FalkorDB servers.
+    # A full-matrix run (nightly or requested) also runs the FalkorDB module on
+    # every Valkey version GLIDE tests; otherwise only on the image's own Valkey.
     test-graph:
-        name: Graph routing (6.2.0 on Valkey)
+        needs: graph-changes
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.graph-changes.outputs.graph == 'true') }}
+        name: Graph routing (6.2.0 on Valkey${{ matrix.valkey != 'bundled' && format(' {0}', matrix.valkey) || '' }})
         runs-on: ubuntu-24.04
         timeout-minutes: 30
+        strategy:
+            fail-fast: false
+            matrix:
+                # "bundled" is the Valkey that the FalkorDB image ships (9.2).
+                valkey: ${{ fromJSON((inputs.full-matrix == true || github.event_name == 'schedule') && '["7.2", "8.0", "8.1", "9.0", "bundled"]' || '["bundled"]') }}
         env:
             CARGO_INCREMENTAL: "0"
             # Only FalkorDB 6.x on Valkey is supported; 4.x (a Redis module) is not
@@ -271,6 +303,7 @@ jobs:
             - uses: ./.github/actions/start-falkordb-docker
               with:
                   image: ${{ env.FALKORDB_IMAGE }}
+                  valkey-image: ${{ matrix.valkey != 'bundled' && format('valkey/valkey:{0}', matrix.valkey) || '' }}
 
             - name: Run graph routing tests
               working-directory: ./glide-core

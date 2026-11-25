@@ -9,10 +9,14 @@
 #
 # Usage:
 #   IMAGE=falkordb/falkordb:6.2.0 utils/start-falkordb-docker.sh
+#   IMAGE=falkordb/falkordb:6.2.0 VALKEY_IMAGE=valkey/valkey:7.2 utils/start-falkordb-docker.sh
 #   utils/start-falkordb-docker.sh stop
 #
 # Environment:
 #   IMAGE               Image to start (required unless stopping).
+#   VALKEY_IMAGE        Optional Valkey image whose valkey-server runs instead of
+#                       the FalkorDB image's own, with the same FalkorDB module,
+#                       to test other Valkey versions.
 #   STANDALONE_PORT     Standalone primary port (default 6479); its replica uses the next port.
 #   CLUSTER_PORT_START  First of 6 consecutive cluster ports (default 7479).
 #   ENV_FILE            Where to write the endpoints outside GitHub Actions
@@ -63,6 +67,20 @@ if [ -z "$SERVER_BIN" ] || [ -z "$CLI_BIN" ]; then
 fi
 echo "Using ${SERVER_BIN} and ${CLI_BIN} from ${IMAGE}"
 
+# Optionally replace the server binary with another Valkey version's, mounted
+# into every node container.
+SERVER_MOUNT=()
+if [ -n "${VALKEY_IMAGE:-}" ]; then
+    docker pull "$VALKEY_IMAGE"
+    VALKEY_BIN_DIR=$(mktemp -d)
+    VALKEY_CID=$(docker create "$VALKEY_IMAGE")
+    docker cp "${VALKEY_CID}:/usr/local/bin/valkey-server" "${VALKEY_BIN_DIR}/valkey-server" >/dev/null
+    docker rm "$VALKEY_CID" >/dev/null
+    SERVER_BIN="/opt/glide-valkey/valkey-server"
+    SERVER_MOUNT=(-v "${VALKEY_BIN_DIR}/valkey-server:${SERVER_BIN}:ro")
+    echo "Using valkey-server from ${VALKEY_IMAGE}"
+fi
+
 stop_all
 
 # cli <container> <port> <args...>: runs the image's CLI inside a container.
@@ -86,7 +104,9 @@ fail() {
 start_node() {
     local name="$1" port="$2"
     shift 2
-    docker run -d --name "$name" --network host --entrypoint "$SERVER_BIN" "$IMAGE" \
+    # The ${arr[@]+...} form keeps an empty array valid under `set -u` in bash 3.2.
+    docker run -d --name "$name" --network host \
+        ${SERVER_MOUNT[@]+"${SERVER_MOUNT[@]}"} --entrypoint "$SERVER_BIN" "$IMAGE" \
         --port "$port" --bind 127.0.0.1 --protected-mode no --dir /tmp \
         --save "" --appendonly no --enable-debug-command yes \
         --loadmodule "$MODULE" "$@" >/dev/null
@@ -156,4 +176,5 @@ else
     } >"$ENV_FILE"
     echo "Endpoints written to ${ENV_FILE}; run: source ${ENV_FILE}"
 fi
-echo "FalkorDB servers ready: standalone ${STANDALONE_ENDPOINTS}; cluster ${CLUSTER_ENDPOINTS}"
+echo "FalkorDB servers ready ($(cli "${PREFIX}-standalone" "$STANDALONE_PORT" INFO server | grep -E '^valkey_version:' | tr -d '\r')):" \
+    "standalone ${STANDALONE_ENDPOINTS}; cluster ${CLUSTER_ENDPOINTS}"
