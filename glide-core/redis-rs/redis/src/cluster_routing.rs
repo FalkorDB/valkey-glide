@@ -1132,14 +1132,14 @@ pub(crate) fn lends_memory(cmd: &[u8]) -> bool {
 /// Returns `true` if the given `cmd` is a FalkorDB graph command that may change
 /// data or server state, so running it twice is not the same as running it once.
 /// Every `GRAPH.*` command not listed here as read-only counts as a write, so a
-/// graph command added later defaults to no resend.
+/// graph command added later defaults to no resend. `GRAPH.PROFILE` is a write:
+/// it runs its query, so profiling a `CREATE` creates the data.
 pub(crate) fn is_graph_write(cmd: &[u8]) -> bool {
     cmd.starts_with(b"GRAPH.")
         && !matches!(
             cmd,
             b"GRAPH.RO_QUERY"
                 | b"GRAPH.EXPLAIN"
-                | b"GRAPH.PROFILE"
                 | b"GRAPH.LIST"
                 | b"GRAPH.UDF LIST"
                 | b"GRAPH.CONFIG GET"
@@ -2605,6 +2605,8 @@ mod tests_routing {
             "GRAPH.UDF FLUSH",
             "GRAPH.CONFIG SET",
             "GRAPH.RESTORE",
+            // Runs its query, which may write.
+            "GRAPH.PROFILE",
             // Not listed anywhere yet: treated as a write.
             "GRAPH.SOMETHING_NEW",
         ] {
@@ -2613,7 +2615,6 @@ mod tests_routing {
         for name in [
             "GRAPH.RO_QUERY",
             "GRAPH.EXPLAIN",
-            "GRAPH.PROFILE",
             "GRAPH.LIST",
             "GRAPH.UDF LIST",
             "GRAPH.CONFIG GET",

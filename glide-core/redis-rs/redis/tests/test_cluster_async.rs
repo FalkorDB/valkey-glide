@@ -5840,6 +5840,11 @@ mod cluster_async {
                     .arg("UNIQUE")
                     .clone(),
             ),
+            (
+                // PROFILE runs its query, so profiling a CREATE writes.
+                "test_async_cluster_graph_profile_is_not_retried_after_an_io_error",
+                cmd("GRAPH.PROFILE").arg("foo").arg("CREATE ()").clone(),
+            ),
         ] {
             let (result, received) = query_graph_after_one_error(name, command, ambiguous_io_error);
             // A second attempt could apply the write twice, so the error goes back
